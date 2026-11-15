@@ -7,11 +7,21 @@ Safety rules:
   * Every sort is recorded so it can be undone.
   * Hidden/system files, shortcuts, Office lock files and unfinished
     downloads are skipped.
+
+Where a file goes, first match wins:
+  1. Course folders: a file whose name contains a course code (ELECTENG101,
+     "electeng 101", ELECTENG_101...) goes into the course folder of that name,
+     found anywhere inside the chosen folder (years, semesters...).
+  2. Code words: a file whose name contains the word goes to that word's folder.
+  3. File type: Images, Documents... (or Other).
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
+import re
+import shutil
 import stat
 import tempfile
 import threading
@@ -41,6 +51,7 @@ class Move:
     src: str
     dst: str
     category: str
+    rule: str = ""  # "course" or "word" when a name rule chose the folder, else ""
 
 
 # ---------------------------------------------------------------- checks
@@ -74,7 +85,22 @@ def folder_problem(folder: str | Path) -> str | None:
         return "This folder doesn't exist (anymore)."
     if not p.is_dir():
         return "This isn't a folder."
-    p = p.resolve()
+    return _protection_problem(p.resolve())
+
+
+def target_problem(folder: str | Path) -> str | None:
+    """Why a name rule can't send files to `folder` (which may not exist yet), or None."""
+    p = Path(folder)
+    if p.exists() and not p.is_dir():
+        return "That's a file, not a folder."
+    try:
+        p = p.resolve()
+    except OSError:
+        return "That folder can't be reached."
+    return _protection_problem(p)
+
+
+def _protection_problem(p: Path) -> str | None:
     if p == Path(p.anchor):
         return "Sorting a whole drive isn't allowed. Pick a specific folder, like Downloads."
     if p == Path.home().resolve():
@@ -117,6 +143,130 @@ def _should_skip(name: str, st: os.stat_result, settings: Settings,
     return False
 
 
+# ---------------------------------------------------------------- name rules
+
+@dataclass
+class NameRule:
+    pattern: re.Pattern
+    folder: Path
+    label: str
+    kind: str  # "course" | "word"
+
+
+def code_pattern(text: str) -> re.Pattern | None:
+    """Match `text` inside a file name, ignoring capitals, spaces, dashes, dots and underscores.
+
+    "ELECTENG 101" matches ELECTENG101, electeng_101 and ElectEng-101, but not
+    ELECTENG1010 (a different number) or XELECTENG101 (part of another word).
+    """
+    chars = [c for c in text if c.isalnum()]
+    if len(chars) < 3:
+        return None
+    body = r"[\s_.\-]*".join(re.escape(c) for c in chars)
+    tail = r"(?!\d)" if chars[-1].isdigit() else ""
+    return re.compile(r"(?<![A-Za-z0-9])" + body + tail, re.IGNORECASE)
+
+
+# A course folder's name starts with a course code: letters, then 3 or 4 digits (and maybe one
+# more letter), e.g. "ELECTENG 101", "COMPSCI101", "MATHS 108G", "ELECTENG 101 - Circuits".
+# "2026", "Sem 2", "Semester 2", "Assignment 3" and "Notes" are not course folders.
+_COURSE_CODE = re.compile(r"^\s*([A-Za-z]{2,10})[\s_\-]?(\d{3,4})([A-Za-z]?)(?=$|[\s_\-.(\[])")
+COURSE_SEARCH_DEPTH = 5          # how many folders deep to look inside a course root
+_course_cache: dict[str, tuple[float, list[Path]]] = {}
+
+
+def course_code(name: str) -> str | None:
+    """'ELECTENG 101 - Circuits' -> 'ELECTENG101'; None if the name isn't a course folder."""
+    m = _COURSE_CODE.match(name)
+    return (m.group(1) + m.group(2) + m.group(3)).upper() if m else None
+
+
+def clear_course_cache() -> None:
+    _course_cache.clear()
+
+
+def course_folders(root: str | Path) -> list[Path]:
+    """Every course folder inside `root`, at any depth (years, semesters...), up to 5 folders deep.
+
+    It doesn't look inside a course folder itself, so "ELECTENG 101\\Lab 1" is never a course.
+    Results are remembered for 15 seconds, so newly made course folders show up quickly.
+    """
+    key = str(root)
+    now = time.monotonic()
+    cached = _course_cache.get(key)
+    if cached and now - cached[0] < 15:
+        return cached[1]
+    found: list[Path] = []
+
+    def walk(folder: str, depth: int) -> None:
+        try:
+            entries = sorted(os.scandir(folder), key=lambda e: e.name.lower())
+        except OSError:
+            return
+        for entry in entries:
+            try:
+                if entry.name.startswith(".") or not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            if course_code(entry.name):
+                found.append(Path(entry.path))
+            elif depth < COURSE_SEARCH_DEPTH:
+                walk(entry.path, depth + 1)
+
+    walk(str(root), 1)
+    _course_cache[key] = (now, found)
+    return found
+
+
+def _newest_first(path: Path) -> list:
+    """Sort key so '2027\\Sem 1' comes before '2026\\Sem 2', which comes before '2026\\Sem 1'."""
+    return [(1, int(t)) if t.isdigit() else (0, t.lower()) for t in re.split(r"(\d+)", str(path))]
+
+
+def build_name_rules(settings: Settings) -> list[NameRule]:
+    rules: list[NameRule] = []
+    seen: set[str] = set()
+    for root in settings.course_roots:
+        # If a course appears in more than one place (a retake, say), the newest year/semester wins.
+        for sub in sorted(course_folders(root), key=_newest_first, reverse=True):
+            code = course_code(sub.name)
+            pattern = code_pattern(code) if code else None
+            if pattern and code not in seen:
+                seen.add(code)
+                rules.append(NameRule(pattern, sub, sub.name, "course"))
+    for rule in settings.keyword_rules:
+        pattern = code_pattern(rule["word"])
+        if pattern:
+            rules.append(NameRule(pattern, Path(rule["folder"]), rule["word"], "word"))
+    return rules
+
+
+ALL_COURSES = "course:*"  # in settings.skipped_groups: leave every course's files alone
+
+
+def is_excluded(move: Move, skipped: set[str]) -> bool:
+    """True if the user excluded this move's group (or all courses, for a course file)."""
+    return group_key(move) in skipped or (move.rule == "course" and ALL_COURSES in skipped)
+
+
+def group_key(move: Move) -> str:
+    """Which group of the plan a move belongs to: 'course:ELECTENG101', 'word:invoice' or 'type:Images'.
+
+    Groups listed in settings.skipped_groups are left alone.
+    """
+    if move.rule == "course":
+        return "course:" + (course_code(move.category) or move.category.upper())
+    if move.rule == "word":
+        return "word:" + "".join(c for c in move.category.lower() if c.isalnum())
+    return "type:" + move.category
+
+
+def match_name_rule(name: str, rules: list[NameRule]) -> NameRule | None:
+    stem = Path(name).stem
+    return next((r for r in rules if r.pattern.search(stem)), None)
+
+
 # ---------------------------------------------------------------- planning
 
 def build_extension_map(categories: dict[str, list[str]]) -> dict[str, str]:
@@ -146,9 +296,13 @@ def unique_destination(path: Path, reserved: set[str]) -> Path:
     return candidate
 
 
-def plan_sort(folder: str | Path, settings: Settings,
-              min_age: float = 0, now: float | None = None) -> list[Move]:
-    """Work out where every loose file in `folder` should go. Moves nothing."""
+def plan_sort(folder: str | Path, settings: Settings, min_age: float = 0,
+              now: float | None = None, include_skipped: bool = False) -> list[Move]:
+    """Work out where every loose file in `folder` should go. Moves nothing.
+
+    Files in a skipped group (settings.skipped_groups) are left out, unless
+    `include_skipped` is set (the preview uses that to show what's being skipped).
+    """
     folder = Path(folder)
     now = time.time() if now is None else now
     ext_map = build_extension_map(settings.categories)
@@ -159,6 +313,13 @@ def plan_sort(folder: str | Path, settings: Settings,
     siblings = {e.name.lower() for e in entries}
     reserved: set[str] = set()
     moves: list[Move] = []
+    rules = build_name_rules(settings)
+    skipped = set() if include_skipped else set(settings.skipped_groups)
+    blocked: dict[Path, bool] = {}  # rule folders that are unsafe, or the folder being sorted itself
+    try:
+        here = folder.resolve()
+    except OSError:
+        here = folder
 
     for entry in sorted(entries, key=lambda e: e.name.lower()):
         try:
@@ -170,12 +331,31 @@ def plan_sort(folder: str | Path, settings: Settings,
         if _should_skip(entry.name, st, settings, siblings, now, min_age):
             continue
 
+        rule = match_name_rule(entry.name, rules)
+        if rule is not None:
+            if rule.folder not in blocked:
+                try:
+                    same = rule.folder.resolve() == here
+                except OSError:
+                    same = False
+                blocked[rule.folder] = same or target_problem(rule.folder) is not None
+            if blocked[rule.folder]:
+                continue  # already where it belongs, or the rule points somewhere unsafe: leave it
+            move = Move(entry.path, str(rule.folder / entry.name), rule.label, rule.kind)
+            if is_excluded(move, skipped):
+                continue
+            move.dst = str(unique_destination(Path(move.dst), reserved))
+            moves.append(move)
+            continue
+
         category = ext_map.get(extension(entry.name))
         if category is None:
             if settings.mode != "month" and not settings.other_folder:
                 continue
             category = OTHER
 
+        if f"type:{category}" in skipped:
+            continue
         sub = subfolder_for(category, st.st_mtime, settings.mode)
         # Never put a file into a subfolder named like the folder it's already in
         # (e.g. sorting "Downloads\Images" must not create "Images\Images").
@@ -194,6 +374,34 @@ def describe_error(err: OSError) -> str:
     if isinstance(err, FileNotFoundError):
         return "it's no longer there"
     return err.strerror or str(err)
+
+
+def _is_cross_drive(err: OSError) -> bool:
+    return getattr(err, "winerror", None) == 17 or err.errno == errno.EXDEV  # ERROR_NOT_SAME_DEVICE
+
+
+def _move_file(src: Path, dst: Path) -> None:
+    """Rename (instant) when possible; copy then delete when the folders are on different drives.
+
+    Never overwrites: fails if `dst` exists. If the original can't be removed after
+    copying, the copy is removed again so the file isn't left in two places.
+    """
+    if dst.exists():
+        raise FileExistsError(errno.EEXIST, "a file with that name is already there", str(dst))
+    try:
+        os.rename(src, dst)
+    except OSError as e:
+        if not _is_cross_drive(e):
+            raise
+        shutil.copy2(src, dst)
+        try:
+            os.remove(src)
+        except OSError:
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
+            raise
 
 
 def _make_dirs(path: Path, created: list[str]) -> None:
@@ -227,8 +435,8 @@ def apply_moves(moves: list[Move], folder: str | Path, source: str = "manual",
                 _make_dirs(dst.parent, created)
                 if dst.exists():  # something appeared since the plan was made
                     dst = unique_destination(dst, set())
-                os.rename(src, dst)  # same folder tree = instant, never overwrites on Windows
-                done.append({"src": str(src), "dst": str(dst), "category": m.category})
+                _move_file(src, dst)
+                done.append({"src": str(src), "dst": str(dst), "category": m.category, "rule": m.rule})
             except OSError as e:
                 errors.append(f"{src.name}: {describe_error(e)}")
         # Drop any folder we made that ended up empty (its file couldn't move).
@@ -272,7 +480,7 @@ def undo_run(run: dict) -> tuple[int, list[str]]:
                                 f"so it came back as \"{target.name}\"")
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                os.rename(dst, target)
+                _move_file(dst, target)
                 restored += 1
             except OSError as e:
                 problems.append(f"{dst.name}: {describe_error(e)}")
