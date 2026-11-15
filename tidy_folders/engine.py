@@ -242,6 +242,26 @@ def build_name_rules(settings: Settings) -> list[NameRule]:
     return rules
 
 
+ALL_COURSES = "course:*"  # in settings.skipped_groups: leave every course's files alone
+
+
+def is_excluded(move: Move, skipped: set[str]) -> bool:
+    """True if the user excluded this move's group (or all courses, for a course file)."""
+    return group_key(move) in skipped or (move.rule == "course" and ALL_COURSES in skipped)
+
+
+def group_key(move: Move) -> str:
+    """Which group of the plan a move belongs to: 'course:ELECTENG101', 'word:invoice' or 'type:Images'.
+
+    Groups listed in settings.skipped_groups are left alone.
+    """
+    if move.rule == "course":
+        return "course:" + (course_code(move.category) or move.category.upper())
+    if move.rule == "word":
+        return "word:" + "".join(c for c in move.category.lower() if c.isalnum())
+    return "type:" + move.category
+
+
 def match_name_rule(name: str, rules: list[NameRule]) -> NameRule | None:
     stem = Path(name).stem
     return next((r for r in rules if r.pattern.search(stem)), None)
@@ -276,9 +296,13 @@ def unique_destination(path: Path, reserved: set[str]) -> Path:
     return candidate
 
 
-def plan_sort(folder: str | Path, settings: Settings,
-              min_age: float = 0, now: float | None = None) -> list[Move]:
-    """Work out where every loose file in `folder` should go. Moves nothing."""
+def plan_sort(folder: str | Path, settings: Settings, min_age: float = 0,
+              now: float | None = None, include_skipped: bool = False) -> list[Move]:
+    """Work out where every loose file in `folder` should go. Moves nothing.
+
+    Files in a skipped group (settings.skipped_groups) are left out, unless
+    `include_skipped` is set (the preview uses that to show what's being skipped).
+    """
     folder = Path(folder)
     now = time.time() if now is None else now
     ext_map = build_extension_map(settings.categories)
@@ -290,6 +314,7 @@ def plan_sort(folder: str | Path, settings: Settings,
     reserved: set[str] = set()
     moves: list[Move] = []
     rules = build_name_rules(settings)
+    skipped = set() if include_skipped else set(settings.skipped_groups)
     blocked: dict[Path, bool] = {}  # rule folders that are unsafe, or the folder being sorted itself
     try:
         here = folder.resolve()
@@ -316,8 +341,11 @@ def plan_sort(folder: str | Path, settings: Settings,
                 blocked[rule.folder] = same or target_problem(rule.folder) is not None
             if blocked[rule.folder]:
                 continue  # already where it belongs, or the rule points somewhere unsafe: leave it
-            dst = unique_destination(rule.folder / entry.name, reserved)
-            moves.append(Move(entry.path, str(dst), rule.label, rule.kind))
+            move = Move(entry.path, str(rule.folder / entry.name), rule.label, rule.kind)
+            if is_excluded(move, skipped):
+                continue
+            move.dst = str(unique_destination(Path(move.dst), reserved))
+            moves.append(move)
             continue
 
         category = ext_map.get(extension(entry.name))
@@ -326,6 +354,8 @@ def plan_sort(folder: str | Path, settings: Settings,
                 continue
             category = OTHER
 
+        if f"type:{category}" in skipped:
+            continue
         sub = subfolder_for(category, st.st_mtime, settings.mode)
         # Never put a file into a subfolder named like the folder it's already in
         # (e.g. sorting "Downloads\Images" must not create "Images\Images").

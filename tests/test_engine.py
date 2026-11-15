@@ -260,6 +260,41 @@ class NameRuleTests(unittest.TestCase):
         engine.clear_course_cache()  # the app does this itself after 15 seconds, or when rules change
         self.assertEqual(self.where(), {"ENGGEN115 report.pdf": Path("Uni/2026/Semester 2/ENGGEN 115")})
 
+    def test_skipped_groups_are_left_alone(self):
+        for name in ["ELECTENG101_Lab1.pdf", "PHYSICS160 notes.pdf", "mystery.xyz", "photo.jpg"]:
+            make(self.downloads, name)
+        self.settings.skipped_groups = ["course:ELECTENG101", "type:Other"]
+        self.assertEqual(self.where(), {
+            "PHYSICS160 notes.pdf": Path("Uni/2026/Semester 2/PHYSICS 160"),
+            "photo.jpg": Path("Downloads/Images"),
+        })
+        everything = engine.plan_sort(self.downloads, self.settings, include_skipped=True)  # what the preview shows
+        self.assertEqual({engine.group_key(m) for m in everything},
+                         {"course:ELECTENG101", "course:PHYSICS160", "type:Other", "type:Images"})
+
+    def test_exclude_all_courses_at_once(self):
+        for name in ["ELECTENG101_Lab1.pdf", "PHYSICS160 notes.pdf", "photo.jpg"]:
+            make(self.downloads, name)
+        self.settings.skipped_groups = [engine.ALL_COURSES]
+        self.assertEqual(self.where(), {"photo.jpg": Path("Downloads/Images")})
+        (self.uni / "2027" / "Semester 1" / "ENGGEN 115").mkdir()   # a course added later is excluded too
+        engine.clear_course_cache()
+        make(self.downloads, "ENGGEN115 report.pdf")
+        self.assertNotIn("ENGGEN115 report.pdf", self.where())
+
+    def test_file_type_logos_are_kept(self):
+        path = self.base / "settings.json"
+        s = Settings(category_icons={"Games": {"glyph": 5, "colour": "#1275B3"}, "Art": {"file": "custom-ab12.png"},
+                                     "Broken": {"glyph": "x"}})
+        save_settings(s, path)
+        self.assertEqual(load_settings(path).category_icons,
+                         {"Games": {"glyph": 5, "colour": "#1275B3"}, "Art": {"file": "custom-ab12.png"}})
+
+    def test_auto_sort_waits_unless_it_was_already_running(self):
+        self.assertTrue(Settings.from_dict({"auto_sort": True}).auto_armed)    # settings from before: keeps running
+        self.assertFalse(Settings.from_dict({"auto_sort": True, "auto_armed": False}).auto_armed)
+        self.assertFalse(Settings().auto_armed)
+
     def test_code_words_and_order(self):
         finance = self.base / "Finance"
         self.settings.keyword_rules = [{"word": "invoice", "folder": str(finance)}]
