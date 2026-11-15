@@ -64,7 +64,7 @@ class Settings:
     close_to_tray: bool = True      # closing the window hides it to the tray
     tray_hint_shown: bool = False   # "still running here" notice shown once
     # Name rules, checked before file types:
-    course_roots: list[str] = field(default_factory=list)   # e.g. ...\UoA\2026\Sem 2: its subfolders are course codes
+    course_roots: list[str] = field(default_factory=list)   # folders searched (at any depth) for course folders
     keyword_rules: list[dict] = field(default_factory=list)  # [{"word": "invoice", "folder": "C:\\...\\Finance"}]
 
     @classmethod

@@ -40,12 +40,15 @@ the first time, because the file isn't code-signed. They can click
 
 On the **Categories** page, under **Send files by name**:
 
-- **Course folders:** pick a folder that holds your course folders, like
-  `UoA\2026\Sem 2`. Any file whose name contains a course code goes into that
-  course's folder: `ELECTENG292_Lab1.pdf`, `electeng 292 notes.docx` and
-  `ElectEng_292.zip` all go to `Sem 2\ELECTENG 292`. Capitals, spaces, dashes and
-  underscores don't matter. Only folders whose names mix letters and numbers count
-  as codes, and a new course folder works straight away.
+- **Course folders:** pick a folder that holds your course folders. Course folders
+  are found anywhere inside it, including inside year and semester folders (up to 5
+  folders deep). A course folder's name starts with a course code: letters, then
+  3 or 4 digits, like `ELECTENG 101` or `ELECTENG 101 - Circuits`. Any file whose
+  name contains that code goes into it: `ELECTENG101_Lab1.pdf`,
+  `electeng 101 notes.docx` and `ElectEng_101.zip` all go to `ELECTENG 101`.
+  Capitals, spaces, dashes and underscores don't matter, and a new course folder
+  works straight away. If the same course is in more than one place, the newest
+  year or semester is used.
 - **Code words:** a word plus a folder, e.g. `invoice` → `Documents\Finance`.
 
 These are checked before file types: course folders first, then code words.
@@ -81,6 +84,8 @@ All the pixel art lives in `tidy_folders/assets/`:
 | `button/` | The Tidy up! button: normal, hover, pressed (48×16) |
 | `switch/` | The auto-sort switch: on, off (20×10) |
 | `sparkle/` | Celebration sparkle frames 1-3 (8×8) |
+| `sorting/` | The sorting animation: `Sorting_1.png`, `Sorting_2.png`... (24×21, any number of frames) plus `timings.txt` (milliseconds per frame). Plays while files move, when auto-sort tidies something, and when you click the buddy |
+| `logo/` | The app logo, `24.png`; `build.bat` makes the other sizes and `icon.ico` from it |
 | `tray/` | Tray icons, 16.png and 32.png; `icon.ico` is made from these by `build.bat` |
 | `fonts/` | Pixelify Sans Bold, used for headings (SIL Open Font License, see `OFL.txt`) |
 

@@ -9,8 +9,9 @@ Safety rules:
     downloads are skipped.
 
 Where a file goes, first match wins:
-  1. Course folders: a file whose name contains a course code (ELECTENG292,
-     "electeng 292", ELECTENG_292...) goes into the course folder of that name.
+  1. Course folders: a file whose name contains a course code (ELECTENG101,
+     "electeng 101", ELECTENG_101...) goes into the course folder of that name,
+     found anywhere inside the chosen folder (years, semesters...).
   2. Code words: a file whose name contains the word goes to that word's folder.
   3. File type: Images, Documents... (or Other).
 """
@@ -155,8 +156,8 @@ class NameRule:
 def code_pattern(text: str) -> re.Pattern | None:
     """Match `text` inside a file name, ignoring capitals, spaces, dashes, dots and underscores.
 
-    "ELECTENG 292" matches ELECTENG292, electeng_292 and ElectEng-292, but not
-    ELECTENG2920 (a different number) or XELECTENG292 (part of another word).
+    "ELECTENG 101" matches ELECTENG101, electeng_101 and ElectEng-101, but not
+    ELECTENG1010 (a different number) or XELECTENG101 (part of another word).
     """
     chars = [c for c in text if c.isalnum()]
     if len(chars) < 3:
@@ -166,27 +167,73 @@ def code_pattern(text: str) -> re.Pattern | None:
     return re.compile(r"(?<![A-Za-z0-9])" + body + tail, re.IGNORECASE)
 
 
-def looks_like_code(name: str) -> bool:
-    """Course-code folder names mix letters and numbers (ELECTENG 292), unlike "2026" or "Notes"."""
-    chars = [c for c in name if c.isalnum()]
-    return len(chars) >= 5 and any(c.isalpha() for c in chars) and any(c.isdigit() for c in chars)
+# A course folder's name starts with a course code: letters, then 3 or 4 digits (and maybe one
+# more letter), e.g. "ELECTENG 101", "COMPSCI101", "MATHS 108G", "ELECTENG 101 - Circuits".
+# "2026", "Sem 2", "Semester 2", "Assignment 3" and "Notes" are not course folders.
+_COURSE_CODE = re.compile(r"^\s*([A-Za-z]{2,10})[\s_\-]?(\d{3,4})([A-Za-z]?)(?=$|[\s_\-.(\[])")
+COURSE_SEARCH_DEPTH = 5          # how many folders deep to look inside a course root
+_course_cache: dict[str, tuple[float, list[Path]]] = {}
+
+
+def course_code(name: str) -> str | None:
+    """'ELECTENG 101 - Circuits' -> 'ELECTENG101'; None if the name isn't a course folder."""
+    m = _COURSE_CODE.match(name)
+    return (m.group(1) + m.group(2) + m.group(3)).upper() if m else None
+
+
+def clear_course_cache() -> None:
+    _course_cache.clear()
 
 
 def course_folders(root: str | Path) -> list[Path]:
-    """The course folders inside a course root, e.g. Sem 2 -> [ELECTENG 204, ELECTENG 292, ...]."""
-    try:
-        subs = [p for p in Path(root).iterdir() if p.is_dir() and looks_like_code(p.name)]
-    except OSError:
-        return []
-    return sorted(subs, key=lambda p: p.name.lower())
+    """Every course folder inside `root`, at any depth (years, semesters...), up to 5 folders deep.
+
+    It doesn't look inside a course folder itself, so "ELECTENG 101\\Lab 1" is never a course.
+    Results are remembered for 15 seconds, so newly made course folders show up quickly.
+    """
+    key = str(root)
+    now = time.monotonic()
+    cached = _course_cache.get(key)
+    if cached and now - cached[0] < 15:
+        return cached[1]
+    found: list[Path] = []
+
+    def walk(folder: str, depth: int) -> None:
+        try:
+            entries = sorted(os.scandir(folder), key=lambda e: e.name.lower())
+        except OSError:
+            return
+        for entry in entries:
+            try:
+                if entry.name.startswith(".") or not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            if course_code(entry.name):
+                found.append(Path(entry.path))
+            elif depth < COURSE_SEARCH_DEPTH:
+                walk(entry.path, depth + 1)
+
+    walk(str(root), 1)
+    _course_cache[key] = (now, found)
+    return found
+
+
+def _newest_first(path: Path) -> list:
+    """Sort key so '2027\\Sem 1' comes before '2026\\Sem 2', which comes before '2026\\Sem 1'."""
+    return [(1, int(t)) if t.isdigit() else (0, t.lower()) for t in re.split(r"(\d+)", str(path))]
 
 
 def build_name_rules(settings: Settings) -> list[NameRule]:
     rules: list[NameRule] = []
+    seen: set[str] = set()
     for root in settings.course_roots:
-        for sub in course_folders(root):
-            pattern = code_pattern(sub.name)
-            if pattern:
+        # If a course appears in more than one place (a retake, say), the newest year/semester wins.
+        for sub in sorted(course_folders(root), key=_newest_first, reverse=True):
+            code = course_code(sub.name)
+            pattern = code_pattern(code) if code else None
+            if pattern and code not in seen:
+                seen.add(code)
                 rules.append(NameRule(pattern, sub, sub.name, "course"))
     for rule in settings.keyword_rules:
         pattern = code_pattern(rule["word"])

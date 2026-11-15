@@ -95,8 +95,13 @@ def plural(n: int, word: str) -> str:
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
+def sentence(text: str) -> str:
+    """End with a full stop, unless the text already ends in "…"."""
+    return text if text.endswith("…") else text + "."
+
+
 def join_names(names: list[str]) -> str:
-    names = [n if len(n) <= 18 else n[:16] + "…" for n in names]
+    names = [n if len(n) <= 24 else n[:22] + "…" for n in names]  # display only
     if len(names) <= 1:
         return "".join(names)
     if len(names) == 2:
@@ -104,20 +109,8 @@ def join_names(names: list[str]) -> str:
     return f"{names[0]}, {names[1]} and {plural(len(names) - 2, 'more folder')}"
 
 
-def short_path(path: str, limit: int = 22) -> str:
-    """'C:\\Users\\you\\Downloads' -> '...\\you\\Downloads' when it doesn't fit."""
-    if len(path) <= limit:
-        return path
-    parts = Path(path).parts
-    for n in (2, 1):
-        tail = "...\\" + "\\".join(parts[-n:])
-        if len(tail) <= limit:
-            return tail
-    return "..." + path[-(limit - 3):]
-
-
 def dest_label(move: engine.Move, folder: str) -> str:
-    """Short name for where a move goes: 'Images', '2026\\Sem 2\\ELECTENG 292' or 'Documents\\Finance'."""
+    """Short name for where a move goes: 'Images', '2026\\Semester 1\\ELECTENG 101' or 'Documents\\Finance'."""
     parent = Path(move.dst).parent
     if move.rule:
         keep = 3 if move.rule == "course" else 2  # courses: show the year too
@@ -137,12 +130,35 @@ def face_for(count: int) -> str:
 
 
 def fit_text(text: str, font: tkfont.Font, max_px: int, side: str = "end") -> str:
-    """Shorten `text` with an ellipsis so it fits in `max_px` (trims the start or the end)."""
+    """Display-only: shorten `text` with "…" so it fits `max_px` (cuts the end, or the start for paths)."""
     if max_px <= 0 or font.measure(text) <= max_px:
         return text
     while text and font.measure(("…" + text) if side == "start" else (text + "…")) > max_px:
         text = text[1:] if side == "start" else text[:-1]
     return ("…" + text) if side == "start" else (text + "…")
+
+
+def wrapped_lines(text: str, font: tkfont.Font, width: int) -> int:
+    """How many lines `text` takes when wrapped at `width` pixels (long words break mid-word)."""
+    count = 0
+    for paragraph in text.split("\n"):
+        lines, line = 1, ""
+        for word in paragraph.split(" "):
+            trial = f"{line} {word}" if line else word
+            if font.measure(trial) <= width:
+                line = trial
+                continue
+            if line:
+                lines += 1
+            while len(word) > 1 and font.measure(word) > width:
+                k = len(word)
+                while k > 1 and font.measure(word[:k]) > width:
+                    k -= 1
+                word = word[k:]
+                lines += 1
+            line = word
+        count += lines
+    return count
 
 
 _fonts_loaded = False
@@ -550,7 +566,11 @@ class App(tk.Tk):
         self.result: tuple[int, list[str]] = (0, [])
         self.celebrating = False
         self.mascot_hover = False
-        self.mascot_poked = False
+        self.animating = False          # the sorting animation is playing on the buddy
+        self._anim_frames: list[tuple[str, int]] | None = None
+        self._anim_index = 0
+        self._anim_stop = False         # finish the current loop, then stop
+        self._anim_finish = None        # what to do once it has stopped
         self.card_widgets: dict[str, tuple[tk.Label, tk.Label]] = {}
         self.tray = self._create_tray()
 
@@ -566,6 +586,7 @@ class App(tk.Tk):
         self._refresh_categories()
         self._refresh_history()
         self._update_mood()
+        self._sorting_frames()  # preload the animation
         if self.tray:
             self.tray.start()
         elif start_hidden:
@@ -692,9 +713,10 @@ class App(tk.Tk):
 
     def _build_sidebar(self) -> None:
         p, sb = self.px, self.sidebar
-        # Fixed height (room for 4 lines) so the mascot and buttons below never jump around.
-        bubble_h = self.f_body.metrics("linespace") * 4 + p(16) + 2 * p(3)
-        bubble = tk.Frame(sb, bg=WHITE, highlightthickness=p(3), highlightbackground=INK, height=bubble_h)
+        # Room for 4 lines (so the mascot and buttons below stay put); it only grows for longer messages.
+        self.bubble = tk.Frame(sb, bg=WHITE, highlightthickness=p(3), highlightbackground=INK,
+                               height=self._bubble_height(4))
+        bubble = self.bubble
         bubble.pack(fill="x", padx=p(20), pady=(p(22), 0))
         bubble.pack_propagate(False)
         self.mood_line = tk.Label(bubble, font=self.f_body, bg=WHITE, fg=INK, justify="left",
@@ -885,24 +907,26 @@ class App(tk.Tk):
             if total == 0:
                 return "faces/happy.png", "All tidy!", "Nothing loose in your folders. Nice."
             return ("faces/happy.png", "Nearly tidy",
-                    f"Just {plural(total, 'loose file')} in {where}. Click Tidy up! to put "
+                    f"Just {plural(total, 'loose file')} in {sentence(where)} Click Tidy up! to put "
                     f"{'it' if total == 1 else 'them'} away.")
         if total < MESSY_FROM:
             return ("faces/sad.png", "A bit messy",
-                    f"{plural(total, 'loose file')} in {where}. Click Preview to see where they’d go.")
+                    f"{plural(total, 'loose file')} in {sentence(where)} Click Preview to see where they’d go.")
         return ("faces/dead.png", "Ugh, what a mess",
-                f"{plural(total, 'loose file')} cluttering {where}. Click Preview to see where they’d go.")
+                f"{plural(total, 'loose file')} cluttering {sentence(where)} Click Preview to see where they’d go.")
 
     def _update_mood(self) -> None:
         art, title, line = self._mood()
-        if self.mascot_poked:
-            art = "faces/happy_tongue.png"
-        elif self.mascot_hover:
+        if self.mascot_hover:
             art = "faces/surprised.png"
-        self.mascot.configure(image=self.sprites.get(art, 8))
-        self.mascot.image_name = art  # for tests
+        if not self.animating:  # the animation draws the buddy itself while it plays
+            self.mascot.configure(image=self.sprites.get(art, 8))
+            self.mascot.image_name = art  # for tests
         self.mood_title.configure(text=title)
         self.mood_line.configure(text=line)
+        lines = max(4, wrapped_lines(line, self.f_body, self.px(222)))
+        if int(self.bubble.cget("height")) != self._bubble_height(lines):
+            self.bubble.configure(height=self._bubble_height(lines))
         total = sum(n for n in self.counts.values() if n)
         hints = {
             "preview": "Nothing moves until you click Tidy up!",
@@ -920,13 +944,70 @@ class App(tk.Tk):
         self._update_mood()
 
     def _poke(self) -> None:
-        self.mascot_poked = True
-        self._update_mood()
-        self.after(700, self._unpoke)
+        """Clicking the buddy plays the sorting animation once."""
+        if not self.busy:
+            self._play_animation_once()
 
-    def _unpoke(self) -> None:
-        self.mascot_poked = False
+    # ------------------------------------------------------------------ sorting animation
+
+    def _sorting_frames(self) -> list[tuple[str, int]]:
+        """[(art, milliseconds)] from assets/sorting/Sorting_1.png, Sorting_2.png... and timings.txt."""
+        if self._anim_frames is None:
+            folder = ASSETS / "sorting"
+            files = sorted(folder.glob("Sorting_*.png"),
+                           key=lambda f: int(re.sub(r"\D", "", f.stem) or 0))
+            try:
+                lines = (folder / "timings.txt").read_text(encoding="utf-8-sig").splitlines()
+                timings = [int(n) for n in re.findall(r"\d+", "\n".join(
+                    l for l in lines if not l.strip().startswith("#")))]
+            except (OSError, ValueError):
+                timings = []
+            self._anim_frames = [
+                (f"sorting/{f.name}", timings[i] if i < len(timings) else (300 if i == len(files) - 1 else 120))
+                for i, f in enumerate(files)]
+            for art, _ in self._anim_frames:  # load them all now so no frame stutters mid-animation
+                self.sprites.get(art, 8)
+        return self._anim_frames
+
+    def _start_animation(self) -> None:
+        if self.animating or not self._sorting_frames():
+            return
+        self.animating, self._anim_index, self._anim_stop, self._anim_finish = True, 0, False, None
+        self._anim_step()
+
+    def _anim_step(self) -> None:
+        if not self.animating:
+            return
+        frames = self._sorting_frames()
+        art, ms = frames[self._anim_index]
+        self.mascot.configure(image=self.sprites.get(art, 8))
+        self.mascot.image_name = art
+        self._anim_index += 1
+        if self._anim_index >= len(frames):
+            self._anim_index = 0
+            if self._anim_stop:  # a full loop is done and so is the work
+                self.after(ms, self._end_animation)
+                return
+        self.after(ms, self._anim_step)
+
+    def _end_animation(self) -> None:
+        self.animating = False
+        callback, self._anim_finish = self._anim_finish, None
         self._update_mood()
+        if callback:
+            callback()
+
+    def _when_animation_ends(self, callback) -> None:
+        """Run `callback` once the current loop finishes (right away if nothing is playing)."""
+        if self.animating:
+            self._anim_finish, self._anim_stop = callback, True
+        else:
+            callback()
+
+    def _play_animation_once(self) -> None:
+        if not self.animating:
+            self._start_animation()
+            self._when_animation_ends(lambda: None)
 
     def _celebrate(self) -> None:
         self.celebrating = True
@@ -1012,7 +1093,7 @@ class App(tk.Tk):
                             bg=CREAM).pack(side="left", padx=(0, p(10)))
             PixelButton(quick, "Choose...", self._browse_folder, app=self, bg=CREAM).pack(side="left")
             return
-        cols = 3
+        cols = 2  # two per row leaves room for long folder names and paths
         for c in range(cols):
             self.cards_frame.columnconfigure(c, weight=1, uniform="cards")
         for i, folder in enumerate(folders):
@@ -1041,8 +1122,12 @@ class App(tk.Tk):
             self.card_widgets[folder] = (face, count)
         self._update_folder_cards()
 
-    def _fit_on_resize(self, label: tk.Label, text: str, font: tkfont.Font, side: str = "end") -> None:
-        """Show as much of `text` as fits the label's width, with an ellipsis when it's cut."""
+    def _bubble_height(self, lines: int) -> int:
+        return self.f_body.metrics("linespace") * lines + self.px(16) + 2 * self.px(3)
+
+    @staticmethod
+    def _fit_on_resize(label: tk.Label, text: str, font: tkfont.Font, side: str = "end") -> None:
+        """Show as much of `text` as fits the label's width, ending in "…" if it's cut (display only)."""
         label.configure(text=text)
         label.bind("<Configure>", lambda e: label.configure(text=fit_text(text, font, e.width - 4, side)))
 
@@ -1184,22 +1269,27 @@ class App(tk.Tk):
             pass
         self.after(150, self._drain_events)
 
-    def _run_in_background(self, work, on_done, message: str) -> None:
+    def _run_in_background(self, work, on_done, message: str, animate: bool = False) -> None:
         self._set_busy(True, message)
+        if animate:
+            self._start_animation()
 
         def runner():
             try:
                 result = work()
             except Exception as err:  # surface anything unexpected instead of dying silently
                 def fail(err=err):
+                    self.animating = False
                     self._set_busy(False)
                     messagebox.showerror(APP_NAME, f"Something went wrong:\n\n{err}", parent=self)
                 self.events.put(fail)
                 return
 
             def finish():
-                self._set_busy(False)
-                on_done(result)
+                def done():
+                    self._set_busy(False)
+                    on_done(result)
+                self._when_animation_ends(done)  # let the animation finish its loop first
             self.events.put(finish)
 
         threading.Thread(target=runner, daemon=True).start()
@@ -1279,7 +1369,7 @@ class App(tk.Tk):
         self._rebuild_folder_cards()
         self._show_panel()
         self._update_mood()
-        self.status_var.set(f"Added {path_str}. Click Preview to see what would move.")
+        self.status_var.set(f"Added {Path(path_str).name or path_str}. Click Preview to see what would move.")
 
     def _remove_folder(self, folder: str) -> None:
         if folder in self.settings.folders:
@@ -1356,7 +1446,7 @@ class App(tk.Tk):
         def work():
             return [engine.apply_moves(moves, folder, "manual", self.history, batch)
                     for folder, moves in plans.items()]
-        self._run_in_background(work, self._after_sort, f"Sorting {plural(total, 'file')}...")
+        self._run_in_background(work, self._after_sort, f"Sorting {plural(total, 'file')}...", animate=True)
 
     def _after_sort(self, results, quiet: bool = False) -> None:
         moved = sum(len(run["moves"]) for run, _ in results)
@@ -1475,8 +1565,8 @@ class App(tk.Tk):
         box.pack(fill="x", padx=p(16), pady=p(14))
         tk.Label(box, text="Send files by name", font=self.f_h2, bg=WHITE, fg=INK, anchor="w").pack(fill="x")
         tk.Label(box, text="Checked before file types: course folders first, then code words. Capitals, "
-                           "spaces, dashes and underscores don't matter, so ELECTENG292, electeng 292 and "
-                           "ElectEng_292 all count.", font=self.f_small, bg=WHITE, fg=MUTED, anchor="w",
+                           "spaces, dashes and underscores don't matter, so ELECTENG101, electeng 101 and "
+                           "ElectEng_101 all count.", font=self.f_small, bg=WHITE, fg=MUTED, anchor="w",
                  justify="left", wraplength=p(640)).pack(fill="x", pady=(p(2), p(10)))
 
         def section(title, button_text, command, help_text):
@@ -1487,7 +1577,7 @@ class App(tk.Tk):
             tk.Label(box, text=help_text, font=self.f_small, bg=WHITE, fg=MUTED, anchor="w", justify="left",
                      wraplength=p(640)).pack(fill="x", pady=(p(2), p(6)))
 
-        def rule_row(icon, title, detail, actions):
+        def rule_row(icon, title, detail, actions, detail_side="end"):
             row = tk.Frame(box, bg=CREAM, highlightthickness=p(2), highlightbackground=LINE)
             row.pack(fill="x", pady=(0, p(6)))
             tk.Label(row, image=self.category_sprite(icon, 1.5), bg=CREAM).pack(side="left", padx=p(8), pady=p(6))
@@ -1499,24 +1589,28 @@ class App(tk.Tk):
                 link(links, label, cmd, app=self, bg=CREAM).pack(side="left")
             text = tk.Frame(row, bg=CREAM)
             text.pack(side="left", fill="x", expand=True, pady=p(6))
-            tk.Label(text, text=title, font=self.f_body_b, bg=CREAM, fg=INK, anchor="w").pack(fill="x")
-            tk.Label(text, text=detail, font=self.f_small, bg=CREAM, fg=MUTED, anchor="w", justify="left",
-                     wraplength=p(470)).pack(fill="x")
+            title_label = tk.Label(text, font=self.f_body_b, bg=CREAM, fg=INK, anchor="w", width=1)
+            title_label.pack(fill="x")
+            self._fit_on_resize(title_label, title, self.f_body_b, side="start")
+            detail_label = tk.Label(text, font=self.f_small, bg=CREAM, fg=MUTED, anchor="w", width=1)
+            detail_label.pack(fill="x")
+            self._fit_on_resize(detail_label, detail, self.f_small, side=detail_side)
 
         section("Course folders", "+ Add course folder", self._add_course_root,
-                "Pick the folder that holds your course folders, like UoA\\2026\\Sem 2. Folders inside it "
-                "with letters and numbers in the name (ELECTENG 292) become the codes, so a new course "
-                "folder works straight away.")
+                "Pick a folder that holds your course folders. Folders named after a course code "
+                "(like ELECTENG 101) are found anywhere inside it, even inside year or semester folders, "
+                "and a new course folder works straight away. If a course is in more than one place, "
+                "the newest year or semester is used.")
         if not self.settings.course_roots:
             tk.Label(box, text="No course folders yet.", font=self.f_small, bg=WHITE, fg=MUTED,
                      anchor="w").pack(fill="x", pady=(0, p(6)))
         for root in self.settings.course_roots:
-            codes = [c.name for c in engine.course_folders(root)]
-            detail = (", ".join(codes) if codes else "No course folders inside yet "
-                      "(their names need letters and numbers, like ELECTENG 292)")
+            codes = sorted({c.name for c in engine.course_folders(root)}, key=str.lower)
+            detail = (f"{plural(len(codes), 'course')}: " + ", ".join(codes) if codes else
+                      "No course folders inside yet (they're named after a course code, like ELECTENG 101)")
             if not Path(root).is_dir():
                 detail = "Can't find this folder any more."
-            rule_row("Course", short_path(root, 48), detail,
+            rule_row("Course", root, detail,
                      [("Open", lambda r=root: self._open_folder(r)),
                       ("Remove", lambda r=root: self._remove_course_root(r))])
 
@@ -1527,9 +1621,9 @@ class App(tk.Tk):
             tk.Label(box, text="No code words yet.", font=self.f_small, bg=WHITE, fg=MUTED,
                      anchor="w").pack(fill="x", pady=(0, p(6)))
         for i, rule in enumerate(self.settings.keyword_rules):
-            rule_row("Code word", f'"{rule["word"]}"', "→ " + short_path(rule["folder"], 60),
+            rule_row("Code word", f'"{rule["word"]}"', "→ " + rule["folder"],
                      [("Open", lambda f=rule["folder"]: self._open_folder(f)),
-                      ("Remove", lambda k=i: self._remove_keyword_rule(k))])
+                      ("Remove", lambda k=i: self._remove_keyword_rule(k))], detail_side="start")
         return holder
 
     def _refresh_categories(self) -> None:
@@ -1590,6 +1684,7 @@ class App(tk.Tk):
         return None
 
     def _categories_changed(self) -> None:
+        engine.clear_course_cache()  # look for course folders afresh
         self._save()
         self._refresh_categories()
         self._after_rules_changed()
@@ -1630,7 +1725,7 @@ class App(tk.Tk):
 
     def _add_course_root(self) -> None:
         path = filedialog.askdirectory(parent=self, mustexist=True,
-                                       title="Choose the folder that holds your course folders (like 2026\\Sem 2)")
+                                       title="Choose a folder that holds your course folders")
         if not path:
             return
         path = str(Path(path))
@@ -1641,15 +1736,18 @@ class App(tk.Tk):
         if any(Path(r).resolve() == Path(path).resolve() for r in self.settings.course_roots):
             self.status_var.set(f"{path} is already a course folder.")
             return
-        codes = [c.name for c in engine.course_folders(path)]
+        engine.clear_course_cache()
+        codes = sorted({c.name for c in engine.course_folders(path)}, key=str.lower)
         if not codes and not messagebox.askyesno(
-                APP_NAME, f"{path}\n\nThere are no course folders inside this folder yet. Course folders need "
-                          "letters and numbers in their name, like \"ELECTENG 292\".\n\nAdd it anyway? Course "
-                          "folders you create in it later will be used automatically.", parent=self):
+                APP_NAME, f"{path}\n\nThere are no course folders in this folder yet, or in the folders "
+                          "inside it. Course folders are named after a course code, like \"ELECTENG 101\".\n\n"
+                          "Add it anyway? Course folders you create in it later will be used automatically.",
+                parent=self):
             return
         self.settings.course_roots.append(path)
         self._categories_changed()
-        self.status_var.set(f"Added {Path(path).name}: " + (", ".join(codes) if codes else "no courses yet") + ".")
+        self.status_var.set(f"Added {Path(path).name}: "
+                            + (f"found {plural(len(codes), 'course')}" if codes else "no courses yet") + ".")
 
     def _remove_course_root(self, root: str) -> None:
         if root in self.settings.course_roots:
@@ -1778,6 +1876,8 @@ class App(tk.Tk):
                 self.phase = "idle"
             self._refresh_everything()
             self._refresh_history()
+            if self.state() != "withdrawn" and not self.busy:
+                self._play_animation_once()  # show the buddy gobbling what auto-sort just tidied
         if errors:
             self.status_var.set(f"Auto-sort couldn't move {plural(len(errors), 'file')}: {errors[0]}")
 
@@ -1873,7 +1973,8 @@ class App(tk.Tk):
             if failed:
                 message += f" {plural(failed, 'file')} couldn't be moved (open in another program?)."
             self.tray.notify(message + " To undo, open Tidy Folders and click Undo.")
-        self._run_in_background(work, done, f"Sorting {plural(total, 'file')}...")
+        self._run_in_background(work, done, f"Sorting {plural(total, 'file')}...",
+                                animate=self.state() != "withdrawn")
 
     def _tray_toggle_auto(self) -> None:
         turn_on = self.auto is None
