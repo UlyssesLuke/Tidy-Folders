@@ -1,4 +1,5 @@
 """Tests for the sorting engine. Run with:  python -m unittest discover tests"""
+import errno
 import os
 import sys
 import tempfile
@@ -180,6 +181,129 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(load_settings(path).folders, [])
         path.write_text('{"mode": "month"}', encoding="utf-8-sig")  # file saved with a BOM
         self.assertEqual(load_settings(path).mode, "month")
+
+
+class NameRuleTests(unittest.TestCase):
+    """Course folders and code words, using a copy of the UoA\\2026\\Sem 2 layout."""
+
+    COURSES = ["ELECTENG 204", "ELECTENG 209", "ELECTENG 292", "ENGGEN 204"]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+        self.downloads = self.base / "Downloads"
+        self.downloads.mkdir()
+        self.sem = self.base / "UoA" / "2026" / "Sem 2"
+        for course in self.COURSES:
+            (self.sem / course).mkdir(parents=True)
+        (self.base / "UoA" / "Competitions").mkdir()
+        self.settings = Settings(course_roots=[str(self.sem)])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def where(self, folder=None):
+        folder = folder or self.downloads
+        return {Path(m.src).name: Path(m.dst).parent.relative_to(self.base)
+                for m in engine.plan_sort(folder, self.settings)}
+
+    def test_course_codes_match_loosely(self):
+        for name in ["ELECTENG292_Assignment1.pdf", "electeng 292 lab notes.docx",
+                     "ENGGEN-204 tutorial.pptx", "ElectEng_204.zip", "Lab3 (ELECTENG209).pdf",
+                     "ELECTENG2920.pdf", "XELECTENG292.pdf", "holiday.jpg", "2026 report.pdf"]:
+            make(self.downloads, name)
+        sem = Path("UoA/2026/Sem 2")
+        self.assertEqual(self.where(), {
+            "ELECTENG292_Assignment1.pdf": sem / "ELECTENG 292",
+            "electeng 292 lab notes.docx": sem / "ELECTENG 292",
+            "ENGGEN-204 tutorial.pptx": sem / "ENGGEN 204",
+            "ElectEng_204.zip": sem / "ELECTENG 204",
+            "Lab3 (ELECTENG209).pdf": sem / "ELECTENG 209",
+            "ELECTENG2920.pdf": Path("Downloads/Documents"),   # different number
+            "XELECTENG292.pdf": Path("Downloads/Documents"),   # part of another word
+            "holiday.jpg": Path("Downloads/Images"),
+            "2026 report.pdf": Path("Downloads/Documents"),
+        })
+
+    def test_only_code_like_folder_names_count(self):
+        self.settings.course_roots = [str(self.base / "UoA")]  # holds "2026" and "Competitions"
+        make(self.downloads, "2026 Competitions entry.pdf")
+        self.assertEqual(self.where(), {"2026 Competitions entry.pdf": Path("Downloads/Documents")})
+        self.assertEqual(engine.course_folders(self.sem), [self.sem / c for c in self.COURSES])
+
+    def test_code_words_and_order(self):
+        finance = self.base / "Finance"
+        self.settings.keyword_rules = [{"word": "invoice", "folder": str(finance)}]
+        make(self.downloads, "march_invoice.pdf")
+        make(self.downloads, "Invoices 2026.xlsx")
+        make(self.downloads, "ELECTENG292 invoice.pdf")   # course folders are checked first
+        self.assertEqual(self.where(), {
+            "march_invoice.pdf": Path("Finance"),
+            "Invoices 2026.xlsx": Path("Finance"),
+            "ELECTENG292 invoice.pdf": Path("UoA/2026/Sem 2/ELECTENG 292"),
+        })
+
+    def test_move_and_undo(self):
+        finance = self.base / "Finance"  # doesn't exist yet: created, then removed by undo
+        self.settings.keyword_rules = [{"word": "invoice", "folder": str(finance)}]
+        make(self.downloads, "ELECTENG292_Lab1.pdf", "lab")
+        make(self.downloads, "invoice.pdf", "money")
+        run, errors = engine.apply_moves(engine.plan_sort(self.downloads, self.settings), self.downloads)
+        self.assertEqual(errors, [])
+        self.assertEqual((self.sem / "ELECTENG 292" / "ELECTENG292_Lab1.pdf").read_text(), "lab")
+        self.assertEqual((finance / "invoice.pdf").read_text(), "money")
+        self.assertEqual({m["rule"] for m in run["moves"]}, {"course", "word"})
+        restored, problems = engine.undo_run(run)
+        self.assertEqual((restored, problems), (2, []))
+        self.assertTrue((self.downloads / "ELECTENG292_Lab1.pdf").exists())
+        self.assertFalse(finance.exists())
+        self.assertTrue((self.sem / "ELECTENG 292").is_dir())  # existed before: kept
+
+    def test_never_overwrites_in_course_folder(self):
+        make(self.sem / "ELECTENG 292", "ELECTENG292_Lab1.pdf", "old")
+        make(self.downloads, "ELECTENG292_Lab1.pdf", "new")
+        self.assertEqual(self.where(), {"ELECTENG292_Lab1.pdf": Path("UoA/2026/Sem 2/ELECTENG 292")})
+        engine.apply_moves(engine.plan_sort(self.downloads, self.settings), self.downloads)
+        self.assertEqual((self.sem / "ELECTENG 292" / "ELECTENG292_Lab1.pdf").read_text(), "old")
+        self.assertEqual((self.sem / "ELECTENG 292" / "ELECTENG292_Lab1 (2).pdf").read_text(), "new")
+
+    def test_files_already_in_their_course_folder_stay(self):
+        course = self.sem / "ELECTENG 292"
+        make(course, "ELECTENG292_Lab1.pdf")
+        self.assertEqual(self.where(course), {})
+
+    def test_unsafe_rule_folder_is_ignored(self):
+        if not os.environ.get("SystemRoot"):
+            self.skipTest("Windows only")
+        self.settings.keyword_rules = [{"word": "driver", "folder": os.environ["SystemRoot"]}]
+        make(self.downloads, "driver.pdf")
+        self.assertEqual(self.where(), {})
+
+    def test_moves_between_drives(self):
+        make(self.downloads, "ELECTENG292_Lab1.pdf", "lab")
+        real_rename = engine.os.rename
+
+        def cross_drive(src, dst):
+            raise OSError(errno.EXDEV, "cross-device link")
+        engine.os.rename = cross_drive
+        try:
+            run, errors = engine.apply_moves(engine.plan_sort(self.downloads, self.settings), self.downloads)
+            self.assertEqual(errors, [])
+            self.assertFalse((self.downloads / "ELECTENG292_Lab1.pdf").exists())
+            self.assertEqual((self.sem / "ELECTENG 292" / "ELECTENG292_Lab1.pdf").read_text(), "lab")
+            self.assertEqual(engine.undo_run(run), (1, []))
+            self.assertTrue((self.downloads / "ELECTENG292_Lab1.pdf").exists())
+        finally:
+            engine.os.rename = real_rename
+
+    def test_settings_keep_rules(self):
+        path = self.base / "settings.json"
+        s = Settings(course_roots=[str(self.sem)],
+                     keyword_rules=[{"word": "invoice", "folder": "C:\\Finance"}, {"bad": 1}])
+        save_settings(s, path)
+        loaded = load_settings(path)
+        self.assertEqual(loaded.course_roots, [str(self.sem)])
+        self.assertEqual(loaded.keyword_rules, [{"word": "invoice", "folder": "C:\\Finance"}])
 
 
 class AutoSorterTests(unittest.TestCase):

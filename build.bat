@@ -11,9 +11,8 @@ if not exist "%PY%" (
 echo Checking build tools ...
 "%PY%" -m pip install --disable-pip-version-check -q -r requirements.txt pyinstaller || goto :error
 
-if not exist "tidy_folders\assets\icon.ico" (
-    "%PY%" packaging\make_icon.py || goto :error
-)
+rem The app icon is made from the tray art (tidy_folders\assets\tray), so redraw it each build.
+"%PY%" packaging\make_icon.py || goto :error
 
 echo Building the .exe ...
 "%PY%" -m PyInstaller --noconfirm --clean --log-level WARN ^
@@ -21,7 +20,7 @@ echo Building the .exe ...
     --name "Tidy Folders" ^
     --hidden-import pystray._win32 ^
     --icon "%~dp0tidy_folders\assets\icon.ico" ^
-    --add-data "%~dp0tidy_folders\assets\icon.ico;tidy_folders\assets" ^
+    --add-data "%~dp0tidy_folders\assets;tidy_folders\assets" ^
     --version-file "%~dp0packaging\version_info.txt" ^
     --distpath "%~dp0dist" --workpath "%~dp0build" --specpath "%~dp0build" ^
     "%~dp0Tidy Folders.pyw" || goto :error

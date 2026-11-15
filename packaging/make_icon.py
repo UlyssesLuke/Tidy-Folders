@@ -1,46 +1,55 @@
-"""Draws the Tidy Folders icon (a folder with sorted bars) and saves it as an .ico.
+"""Builds the app icon (tidy_folders/assets/icon.ico) and the small logo sizes from logo/24.png.
 
-Usage:  python packaging/make_icon.py [optional-preview.png]
-Needs Pillow (installed in the build environment by build.bat).
+24x24 is the hand-drawn logo: the size Windows uses for taskbar icons at 100% scaling.
+Every other size is made without blurring:
+  * 48: the 24 doubled (each pixel becomes a 2x2 block)
+  * 32, 64, 128, 256: the biggest whole-number enlargement that fits, centred
+  * 16: logo/16.png if you have drawn one, otherwise 16 of the 24 rows and columns,
+    picked so both eyes stay 2 pixels wide and the tongue keeps its highlight
+
+Usage:  python packaging/make_icon.py      (needs Pillow; build.bat installs it)
 """
-import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
-OUT = Path(__file__).resolve().parents[1] / "tidy_folders" / "assets" / "icon.ico"
-S = 1024  # draw big, then scale down for smooth edges
+ASSETS = Path(__file__).resolve().parents[1] / "tidy_folders" / "assets"
+LOGO = ASSETS / "logo"
+KEEP = [1, 2, 4, 5, 7, 8, 9, 11, 12, 14, 15, 16, 18, 19, 21, 22]  # rows/columns kept for 16x16
 
 
-def draw() -> Image.Image:
-    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    # folder: tab, back panel, front panel
-    d.rounded_rectangle((90, 150, 470, 330), radius=60, fill="#D9961A")
-    d.rounded_rectangle((90, 230, 934, 860), radius=70, fill="#E5A520")
-    d.rounded_rectangle((90, 330, 934, 900), radius=70, fill="#FFC940")
-    # three sorted bars, each with a coloured dot
-    bars = [(470, 760, "#2F7CF6"), (590, 650, "#1FB45A"), (710, 540, "#E8457E")]
-    for top, right, colour in bars:
-        d.rounded_rectangle((200, top, right, top + 76), radius=38, fill="#FFFFFF")
-        d.ellipse((222, top + 14, 270, top + 62), fill=colour)
-    return img
+def scaled(image: Image.Image, factor: int) -> Image.Image:
+    return image.resize((image.width * factor, image.height * factor), Image.NEAREST)
+
+
+def centred(image: Image.Image, size: int) -> Image.Image:
+    big = scaled(image, max(1, size // image.width))
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    canvas.paste(big, ((size - big.width) // 2, (size - big.height) // 2))
+    return canvas
+
+
+def reduce_to_16(image: Image.Image) -> Image.Image:
+    small = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+    src, dst = image.load(), small.load()
+    for y, sy in enumerate(KEEP):
+        for x, sx in enumerate(KEEP):
+            dst[x, y] = src[sx, sy]
+    return small
 
 
 def main() -> None:
-    big = draw()
-    base = big.resize((256, 256), Image.LANCZOS)
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    base.save(OUT, format="ICO", sizes=[(16, 16), (24, 24), (32, 32), (48, 48),
-                                        (64, 64), (128, 128), (256, 256)])
-    print("saved", OUT)
-    if len(sys.argv) > 1:  # optional preview at a few sizes
-        sheet = Image.new("RGBA", (256 + 64 + 32 + 16 + 60, 256), (240, 240, 240, 255))
-        x = 0
-        for size in (256, 64, 32, 16):
-            sheet.alpha_composite(big.resize((size, size), Image.LANCZOS), (x, 0))
-            x += size + 20
-        sheet.save(sys.argv[1])
+    logo = Image.open(LOGO / "24.png").convert("RGBA")
+    hand_16 = LOGO / "16_drawn.png"
+    small = Image.open(hand_16).convert("RGBA") if hand_16.exists() else reduce_to_16(logo)
+    small.save(LOGO / "16.png")
+    centred(logo, 32).save(LOGO / "32.png")
+
+    images = [small, logo, centred(logo, 32), scaled(logo, 2),
+              centred(logo, 64), centred(logo, 128), centred(logo, 256)]
+    out = ASSETS / "icon.ico"
+    images[-1].save(out, format="ICO", sizes=[im.size for im in images], append_images=images[:-1])
+    print("saved", out, [im.size for im in images])
 
 
 if __name__ == "__main__":
