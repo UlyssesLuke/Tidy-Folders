@@ -1,0 +1,3 @@
+# Optional when running from source; bundled into the .exe by build.bat.
+pystray>=0.19   # tray icon next to the clock
+pillow>=10      # tray icon image (and drawing the app icon)

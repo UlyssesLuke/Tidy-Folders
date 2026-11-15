@@ -1,0 +1,8 @@
+# Build output: recreate any time with build.bat
+build/
+dist/
+.venv/
+
+# Python caches
+__pycache__/
+*.pyc
