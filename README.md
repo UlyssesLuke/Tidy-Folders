@@ -29,12 +29,32 @@ the first time, because the file isn't code-signed. They can click
 
 ## How it works
 
-1. **Sort tab:** add folders (or use the Downloads / Desktop / Documents buttons),
-   click **Preview** to see exactly what would move, then **Sort now**.
-2. **Categories tab:** change which file types go into which folder, or add your own.
-3. **History & undo tab:** every sort is listed and can be undone.
-4. **Automatic sorting:** tick the box and new files get sorted every few seconds.
-   Files are left alone until they're a minute old, so downloads can finish.
+1. **Sort page:** add folders (Downloads, Desktop, Documents or any other), click
+   **Preview** to see exactly what would move, then **Tidy up!**.
+2. **Exclude a group:** in the Preview, click **Exclude** on any group (a course, a
+   code word, or a type like Other) and its files are left where they are, by
+   Tidy up! and auto-sort alike. Click **Include again** there, or **Include** on the
+   Categories page, to sort them again. All courses share one **Courses** row:
+   **Show courses ▾** lists each course (each with its own Exclude), and
+   **Exclude all courses** / **Include all courses** act on every course at once,
+   including courses added later.
+3. **Categories page:** change which file types go into which folder, or click
+   the **Add file type** box (last in the grid) to make your own. Each file type gets a logo: pick one of 8
+   symbols and one of 9 colours, or upload your own picture (24×21 pixel art looks
+   best; bigger pictures are shrunk to fit). Click any file type to change it or its logo.
+4. **History page:** every tidy-up is listed and can be undone.
+5. **Automatic sorting:** switch it on, then click **Tidy up!** once. Nothing moves
+   until you do, so the first tidy-up is always yours to check. After that, new
+   files are sorted by themselves. Files are left alone until they're a minute old,
+   so downloads can finish.
+
+A category folder like `Installers` or `Music` doesn't need to exist beforehand:
+it's created the first time a file needs it, and never created if no file does.
+It goes inside the folder being tidied, so Code files in Downloads go to
+`Downloads\Code`. In the Preview, a small folder-with-a-plus symbol next to a group
+means that folder doesn't exist yet and Tidy up! will create it (hover it to see
+where). Hover the blue **→ Folder\\** label to see the full path files go to.
+Undo removes any folder a tidy-up created, as long as it's empty again.
 
 ## Course folders and code words
 
@@ -84,6 +104,8 @@ All the pixel art lives in `tidy_folders/assets/`:
 | `button/` | The Tidy up! button: normal, hover, pressed (48×16) |
 | `switch/` | The auto-sort switch: on, off (20×10) |
 | `sparkle/` | Celebration sparkle frames 1-3 (8×8) |
+| `glyphs/` | Symbols for file-type logos, `1.png`-`8.png` (16×14, white on transparent; the app puts them on a coloured tile), plus `upload.png` for the "upload your own" tile and `add.png` for the Add file type box. Uploaded logos are kept in `%APPDATA%\TidyFolders\icons` |
+| `badges/` | `new_folder.png`: shown in the Preview next to a folder that will be created (16×14) |
 | `sorting/` | The sorting animation: `Sorting_1.png`, `Sorting_2.png`... (24×21, any number of frames) plus `timings.txt` (milliseconds per frame). Plays while files move, when auto-sort tidies something, and when you click the buddy |
 | `logo/` | The app logo, `24.png`; `build.bat` makes the other sizes and `icon.ico` from it |
 | `tray/` | Tray icons, 16.png and 32.png; `icon.ico` is made from these by `build.bat` |

@@ -16,7 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from . import engine, startup
 from . import tray as tray_mod
-from .rules import APP_NAME, default_categories, load_settings, normalize_ext, save_settings
+from .rules import APP_NAME, data_dir, default_categories, load_settings, normalize_ext, save_settings
 from .watcher import AutoSorter
 
 ASSETS = Path(__file__).resolve().parent / "assets"
@@ -35,6 +35,7 @@ MUTED = "#5C5446"
 BLUE = "#1275B3"
 LINE = "#F0E6C8"
 HINT_BG = "#FFFBEB"
+SKIPPED_BG = "#F4F1E8"
 CHIP_BG = "#E8F3FB"
 CHIP_FG = "#0D5A8A"
 DISABLED_FACE = "#F1ECDD"
@@ -189,15 +190,64 @@ class Sprites:
         return max(1, int(base * self.scale + 0.5))
 
     def get(self, rel: str, base_zoom: float = 1) -> tk.PhotoImage:
+        """`rel` is a path inside assets/, or a full path (e.g. an uploaded logo)."""
         zoom = self.zoom_for(base_zoom)
         key = (rel, zoom)
         if key not in self._cache:
+            path = Path(rel) if Path(rel).is_absolute() else ASSETS / rel
             try:
-                img = tk.PhotoImage(master=self.master, file=str(ASSETS / rel))
+                img = tk.PhotoImage(master=self.master, file=str(path))
             except tk.TclError:  # missing art: a blank stand-in rather than a crash
                 img = tk.PhotoImage(master=self.master, width=24, height=21)
             self._cache[key] = img.zoom(zoom) if zoom > 1 else img
         return self._cache[key]
+
+    def compose(self, glyph: str, colour: str, base_zoom: float = 1) -> tk.PhotoImage:
+        """A file-type logo: a white symbol (assets/glyphs/<glyph>.png, 16x14) on a coloured
+        tile, laid out like the built-in category icons (24x21)."""
+        zoom = self.zoom_for(base_zoom)
+        key = (f"compose:{glyph}:{colour}", zoom)
+        if key not in self._cache:
+            img = tk.PhotoImage(master=self.master, width=24, height=21)
+            img.put(colour, to=(2, 0, 22, 21))
+            try:
+                symbol = tk.PhotoImage(master=self.master, file=str(ASSETS / "glyphs" / f"{glyph}.png"))
+                img.tk.call(img, "copy", symbol, "-to", 4, 3, "-compositingrule", "overlay")
+            except tk.TclError:
+                pass
+            self._cache[key] = img.zoom(zoom) if zoom > 1 else img
+        return self._cache[key]
+
+
+ICON_COLOURS = ["#C23B4A", "#D2582A", "#6B7F1A", "#2E8A57", "#0E8A8A",
+                "#1275B3", "#3949AB", "#7B4FA8", "#C74183"]  # white symbols stay readable on all of them
+UPLOAD_TILE = "#7A8086"
+
+
+def icons_dir() -> Path:
+    folder = data_dir() / "icons"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def import_logo(source: str, master: tk.Misc) -> str:
+    """Copy a picture the user picked into the app's icons folder, fitted to 24x21. Returns its file name."""
+    name = f"custom-{uuid.uuid4().hex[:8]}.png"
+    target = icons_dir() / name
+    try:
+        from PIL import Image
+        im = Image.open(source).convert("RGBA")
+        if im.size != (24, 21):
+            im.thumbnail((24, 21), Image.NEAREST if max(im.size) <= 48 else Image.LANCZOS)
+            canvas = Image.new("RGBA", (24, 21), (0, 0, 0, 0))
+            canvas.paste(im, ((24 - im.width) // 2, (21 - im.height) // 2), im)
+            im = canvas
+        im.save(target)
+    except ImportError:  # no Pillow (running from source without it): PNG/GIF, shrunk by whole numbers
+        img = tk.PhotoImage(master=master, file=source)
+        factor = max(1, -(-img.width() // 24), -(-img.height() // 21))
+        (img.subsample(factor) if factor > 1 else img).write(str(target), format="png")
+    return name
 
 
 # ====================================================================== pixel widgets
@@ -397,6 +447,40 @@ class ScrollFrame(tk.Frame):
         self.canvas.yview_moveto(0)
 
 
+class FlowFrame(tk.Frame):
+    """Lays its items out left to right and wraps onto new lines to fit its width."""
+
+    def __init__(self, parent, *, bg, gap=8):
+        super().__init__(parent, bg=bg, height=1)
+        self.items: list[tk.Widget] = []
+        self.gap = gap
+        self.bind("<Configure>", lambda e: self._layout())
+
+    def clear(self) -> None:
+        for widget in self.items:
+            widget.destroy()
+        self.items = []
+
+    def add(self, widget: tk.Widget) -> None:
+        self.items.append(widget)
+        self.after_idle(self._layout)
+
+    def _layout(self) -> None:
+        if not self.winfo_exists():
+            return
+        width = max(self.winfo_width(), 50)
+        x = y = line = 0
+        for widget in self.items:
+            w, h = widget.winfo_reqwidth(), widget.winfo_reqheight()
+            if x and x + w > width:
+                x, y, line = 0, y + line + 2, 0
+            widget.place(x=x, y=y)
+            x += w + self.gap
+            line = max(line, h)
+        if int(self["height"]) != y + line:
+            self.configure(height=max(1, y + line))
+
+
 def shadow_card(parent, app, *, bg, fill=WHITE, border=3, depth=4):
     """A box with a thick ink outline and a hard offset shadow. Returns (holder, inside)."""
     holder = tk.Frame(parent, bg=bg)
@@ -411,6 +495,50 @@ def shadow_card(parent, app, *, bg, fill=WHITE, border=3, depth=4):
     return holder, card
 
 
+class Tooltip:
+    """A small note that appears when the mouse rests on a widget."""
+
+    def __init__(self, widget: tk.Widget, text: str, *, app, delay: int = 300):
+        self.widget, self.text, self.app, self.delay = widget, text, app, delay
+        self.tip: tk.Toplevel | None = None
+        self.job = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        self.job = self.widget.after(self.delay, self.show)
+
+    def _cancel(self) -> None:
+        if self.job:
+            self.widget.after_cancel(self.job)
+            self.job = None
+
+    def show(self) -> None:
+        if self.tip or not self.widget.winfo_exists():
+            return
+        p = self.app.px
+        self.tip = tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        tip.attributes("-topmost", True)
+        box = tk.Frame(tip, bg=CREAM, highlightthickness=p(2), highlightbackground=INK)
+        box.pack()
+        tk.Label(box, text=self.text, font=self.app.f_small, bg=CREAM, fg=INK, justify="left",
+                 wraplength=p(340)).pack(padx=p(8), pady=p(5))
+        tip.update_idletasks()
+        x = self.widget.winfo_rootx() + self.widget.winfo_width() - tip.winfo_width()
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + p(4)
+        x = max(4, min(x, tip.winfo_screenwidth() - tip.winfo_width() - 4))
+        tip.geometry(f"+{x}+{y}")
+
+    def _hide(self, _event=None) -> None:
+        self._cancel()
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+
 def link(parent, text, command, *, app, bg):
     label = tk.Label(parent, text=text, font=app.f_link, fg=BLUE, bg=bg, cursor="hand2")
     label.bind("<Button-1>", lambda e: command())
@@ -420,17 +548,31 @@ def link(parent, text, command, *, app, bg):
 # ====================================================================== category dialog
 
 class CategoryDialog(tk.Toplevel):
-    """Small window for adding, editing or removing one category."""
+    """Add or edit one file type: its folder name, its extensions and its logo.
 
-    def __init__(self, app, title, validate, name="", exts="", can_remove=False):
+    The logo picker is a 3x3 grid: 8 ready-made symbols (assets/glyphs/1-8.png) and an
+    "upload your own" tile, next to 9 colours to put the symbol on.
+    """
+
+    def __init__(self, app, title, validate, name="", exts="", can_remove=False, icon=None, wait=True):
         super().__init__(app)
         p = app.px
+        self.app = app
         self.title(title)
         self.transient(app)
         self.resizable(False, False)
         self.configure(bg=PAGE)
         self.result: tuple | None = None
         self._validate = validate
+        self.original_name = name
+        self.icon_changed = False
+        self.glyph = icon.get("glyph") if icon else None
+        self.file = icon.get("file") if icon else None
+        self.colour = (icon or {}).get("colour") or ICON_COLOURS[0]
+        if not icon and not name:  # a brand-new file type starts with a logo already picked
+            self.glyph = 1
+            self.colour = ICON_COLOURS[len(app.settings.category_icons) % len(ICON_COLOURS)]
+            self.icon_changed = True
 
         body = tk.Frame(self, bg=PAGE)
         body.pack(fill="both", expand=True, padx=p(20), pady=p(18))
@@ -441,24 +583,114 @@ class CategoryDialog(tk.Toplevel):
         tk.Label(body, text="File types, separated by commas (for example: jpg, png, gif)",
                  font=app.f_body_b, bg=PAGE, fg=INK).grid(row=2, column=0, sticky="w")
         self.exts_var = tk.StringVar(value=exts)
-        ttk.Entry(body, textvariable=self.exts_var, width=64, font=app.f_body).grid(
-            row=3, column=0, sticky="we", pady=(p(4), p(18)))
+        ttk.Entry(body, textvariable=self.exts_var, width=56, font=app.f_body).grid(
+            row=3, column=0, sticky="we", pady=(p(4), p(16)))
+
+        tk.Label(body, text="Logo", font=app.f_body_b, bg=PAGE, fg=INK).grid(row=4, column=0, sticky="w")
+        tk.Label(body, text="Pick a symbol and a colour, or upload your own picture (24×21 pixel art looks best).",
+                 font=app.f_small, bg=PAGE, fg=MUTED).grid(row=5, column=0, sticky="w", pady=(0, p(6)))
+        picker = tk.Frame(body, bg=PAGE)
+        picker.grid(row=6, column=0, sticky="w", pady=(0, p(18)))
+        symbols = tk.Frame(picker, bg=PAGE)
+        symbols.pack(side="left")
+        self.tiles: list[tk.Label] = []
+        for i in range(9):
+            tile = tk.Label(symbols, bg=PAGE, bd=0, cursor="hand2", highlightthickness=p(3),
+                            highlightbackground=PAGE)
+            tile.grid(row=i // 3, column=i % 3, padx=p(2), pady=p(2))
+            tile.bind("<Button-1>", (lambda e, g=i + 1: self._pick_glyph(g)) if i < 8 else (lambda e: self._upload()))
+            self.tiles.append(tile)
+        tk.Label(symbols, text="↑ upload your own", font=app.f_small, bg=PAGE, fg=MUTED).grid(
+            row=3, column=1, columnspan=2, sticky="e")
+        colours = tk.Frame(picker, bg=PAGE)
+        colours.pack(side="left", padx=(p(18), 0), anchor="n")
+        self.swatches: list[tuple[tk.Canvas, str]] = []
+        size = p(30)
+        for i, colour in enumerate(ICON_COLOURS):
+            sw = tk.Canvas(colours, width=size, height=size, bg=PAGE, highlightthickness=0, cursor="hand2")
+            sw.grid(row=i // 3, column=i % 3, padx=p(3), pady=p(3))
+            sw.bind("<Button-1>", lambda e, c=colour: self._pick_colour(c))
+            self.swatches.append((sw, colour))
+        preview = tk.Frame(picker, bg=PAGE)
+        preview.pack(side="left", padx=(p(22), 0), anchor="n")
+        tk.Label(preview, text="Preview", font=app.f_small_b, bg=PAGE, fg=MUTED).pack(anchor="w")
+        self.preview = tk.Label(preview, bg=PAGE)
+        self.preview.pack(anchor="w", pady=(p(4), p(4)))
+        if name and (ASSETS / "categories" / f"{name}.png").exists():
+            link(preview, "Use the original logo", self._use_original, app=app, bg=PAGE).pack(anchor="w")
+
         buttons = tk.Frame(body, bg=PAGE)
-        buttons.grid(row=4, column=0, sticky="we")
+        buttons.grid(row=7, column=0, sticky="we")
         if can_remove:
             PixelButton(buttons, "Remove", self._remove, app=app, bg=PAGE).pack(side="left")
         PixelButton(buttons, "Cancel", self.destroy, app=app, bg=PAGE).pack(side="right")
         PixelButton(buttons, "Save", self._save, app=app, bg=PAGE, face=YELLOW).pack(side="right", padx=(0, p(10)))
         self.bind("<Return>", lambda e: self._save())
         self.bind("<Escape>", lambda e: self.destroy())
+        self._refresh_picker()
 
         self.update_idletasks()
         x = app.winfo_rootx() + (app.winfo_width() - self.winfo_width()) // 2
         y = app.winfo_rooty() + (app.winfo_height() - self.winfo_height()) // 3
         self.geometry(f"+{max(0, x)}+{max(0, y)}")
         name_entry.focus_set()
-        self.grab_set()
-        self.wait_window()
+        if wait:  # tests drive the window without waiting on it
+            self.grab_set()
+            self.wait_window()
+
+    # --- logo picker
+    def icon_spec(self) -> dict | None:
+        if self.file:
+            return {"file": self.file}
+        return {"glyph": self.glyph, "colour": self.colour} if self.glyph else None
+
+    def _refresh_picker(self) -> None:
+        app = self.app
+        for i, tile in enumerate(self.tiles):
+            if i < 8:
+                tile.configure(image=app.sprites.compose(str(i + 1), self.colour, 2))
+                chosen = not self.file and self.glyph == i + 1
+            else:
+                tile.configure(image=app.icon_image({"file": self.file}, base_zoom=2) if self.file
+                               else app.sprites.compose("upload", UPLOAD_TILE, 2))
+                chosen = bool(self.file)
+            tile.configure(highlightbackground=BLUE if chosen else PAGE)
+        b = app.px(3)
+        for sw, colour in self.swatches:
+            sw.delete("all")
+            size = int(sw["width"])
+            if colour == self.colour and self.glyph and not self.file:
+                sw.create_rectangle(0, 0, size, size, fill=INK, outline="")
+            sw.create_rectangle(b, b, size - b, size - b, fill=colour, outline="")
+        self.preview.configure(image=app.icon_image(self.icon_spec(), self.original_name, 4))
+
+    def _pick_glyph(self, glyph: int) -> None:
+        self.glyph, self.file, self.icon_changed = glyph, None, True
+        self._refresh_picker()
+
+    def _pick_colour(self, colour: str) -> None:
+        self.colour, self.file, self.icon_changed = colour, None, True
+        if not self.glyph:
+            self.glyph = 1
+        self._refresh_picker()
+
+    def _upload(self) -> None:
+        source = filedialog.askopenfilename(parent=self, title="Choose a picture for this file type",
+                                            filetypes=[("Pictures", "*.png *.gif *.jpg *.jpeg *.bmp"),
+                                                       ("All files", "*.*")])
+        if not source:
+            return
+        try:
+            self.file = import_logo(source, self)
+        except Exception as err:
+            messagebox.showwarning(APP_NAME, f"That picture couldn't be used:\n\n{err}", parent=self)
+            return
+        self.glyph, self.icon_changed = None, True
+        self._refresh_picker()
+
+    def _use_original(self) -> None:
+        self.glyph, self.file, self.icon_changed = None, None, True
+        self._refresh_picker()
 
     def _save(self) -> None:
         name = self.name_var.get().strip()
@@ -566,6 +798,7 @@ class App(tk.Tk):
         self.result: tuple[int, list[str]] = (0, [])
         self.celebrating = False
         self.mascot_hover = False
+        self.courses_expanded = False   # the Courses dropdown in the preview
         self.animating = False          # the sorting animation is playing on the buddy
         self._anim_frames: list[tuple[str, int]] | None = None
         self._anim_index = 0
@@ -577,7 +810,7 @@ class App(tk.Tk):
         self._init_fonts()
         self._init_style()
         self._build()
-        if self.settings.auto_sort:
+        if self.settings.auto_sort and self.settings.auto_armed:
             self._start_auto()
         self._update_auto_label()
         self._scan()
@@ -683,8 +916,18 @@ class App(tk.Tk):
                         darkcolor=WHITE, padding=self.px(5))
 
     def category_sprite(self, name: str, base_zoom: float = 2) -> tk.PhotoImage:
+        """A file type's logo: the one picked for it, else its built-in art, else the plain folder."""
+        return self.icon_image(self.settings.category_icons.get(name), name, base_zoom)
+
+    def icon_image(self, spec: dict | None, name: str = "", base_zoom: float = 2) -> tk.PhotoImage:
+        if spec and spec.get("file"):
+            path = icons_dir() / spec["file"]
+            if path.exists():
+                return self.sprites.get(str(path), base_zoom)
+        elif spec and spec.get("glyph"):
+            return self.sprites.compose(str(spec["glyph"]), spec.get("colour", ICON_COLOURS[0]), base_zoom)
         art = f"categories/{name}.png"
-        return self.sprites.get(art if (ASSETS / art).exists() else "faces/front.png", base_zoom)
+        return self.sprites.get(art if name and (ASSETS / art).exists() else "faces/front.png", base_zoom)
 
     # ------------------------------------------------------------------ layout
 
@@ -814,10 +1057,13 @@ class App(tk.Tk):
         interval.pack(side="left", padx=(p(8), 0))
         interval.bind("<<ComboboxSelected>>", self._on_interval_changed)
         self.auto_face = tk.Label(row, bg=CREAM, image=self.sprites.get("faces/smug.png", 2))
+        self.auto_wait = tk.Label(box, bg=CREAM, fg=BLUE, font=self.f_small_b,  # its own line, so it always fits
+                                  text="Waiting: auto-sort starts after your first Tidy up!")
 
         row2 = tk.Frame(box, bg=CREAM)
         row2.pack(fill="x", padx=p(14), pady=(p(4), p(12)))
-        exe_only = "  (in the .exe version)"
+        self.auto_row2 = row2
+        exe_only = " (.exe only)"
         self.startup_var = tk.BooleanVar(value=startup.supported() and startup.is_enabled())
         start_cb = ttk.Checkbutton(row2, text="Start with Windows", variable=self.startup_var,
                                    command=self._toggle_startup, style="Cream.TCheckbutton")
@@ -826,7 +1072,7 @@ class App(tk.Tk):
             start_cb.configure(text=start_cb.cget("text") + exe_only)
             start_cb.state(["disabled"])
         self.tray_var = tk.BooleanVar(value=self.settings.close_to_tray)
-        tray_cb = ttk.Checkbutton(row2, text="Keep running in the tray when I close the window",
+        tray_cb = ttk.Checkbutton(row2, text="Keep running in the tray when closed",
                                   variable=self.tray_var, command=self._toggle_close_to_tray,
                                   style="Cream.TCheckbutton")
         tray_cb.pack(side="left", padx=(p(22), 0))
@@ -839,33 +1085,36 @@ class App(tk.Tk):
         p = self.px
         view = tk.Frame(self.main, bg=PAGE)
         head = self._heading(view, "Categories")
-        PixelButton(head, "+ Add category", self._add_category, app=self, bg=PAGE).pack(side="right")
-        PixelButton(head, "Reset", self._reset_categories, app=self, bg=PAGE).pack(side="right", padx=(0, p(10)))
-        tk.Label(view, text="Each category becomes a folder. Files match by type: photo.jpg is a jpg. "
-                            "Click a category to change it.", font=self.f_body, fg=MUTED, bg=PAGE,
-                 anchor="w").pack(fill="x", padx=p(28))
+        PixelButton(head, "Reset", self._reset_categories, app=self, bg=PAGE).pack(side="right")
+        self._wrap(tk.Label(view, text="Each file type becomes a folder. Files match by type: photo.jpg is a jpg. "
+                                       "Click a file type to change it or its logo.", font=self.f_body, fg=MUTED,
+                            bg=PAGE)).pack(fill="x", padx=p(28))
 
         holder, card = shadow_card(view, self, bg=PAGE, fill=CREAM)
         holder.pack(fill="x", padx=p(28), pady=(p(14), p(16)))
         inner = tk.Frame(card, bg=CREAM)
         inner.pack(fill="x", padx=p(14), pady=p(12))
-        tk.Label(inner, text="Organize by", font=self.f_body_b, bg=CREAM, fg=INK).grid(row=0, column=0, sticky="w")
+        mode_row = tk.Frame(inner, bg=CREAM)
+        mode_row.pack(fill="x")
+        tk.Label(mode_row, text="Organize by", font=self.f_body_b, bg=CREAM, fg=INK).pack(side="left")
         self.mode_var = tk.StringVar(value=MODE_LABELS[self.settings.mode])
-        mode_box = ttk.Combobox(inner, textvariable=self.mode_var, values=list(MODE_LABELS.values()),
-                                state="readonly", width=38, font=self.f_body)
-        mode_box.grid(row=0, column=1, sticky="w", padx=(p(12), 0))
+        mode_box = ttk.Combobox(mode_row, textvariable=self.mode_var, values=list(MODE_LABELS.values()),
+                                state="readonly", width=36, font=self.f_body)
+        mode_box.pack(side="left", padx=(p(12), 0))
         mode_box.bind("<<ComboboxSelected>>", self._on_options_changed)
         self.other_var = tk.BooleanVar(value=self.settings.other_folder)
         ttk.Checkbutton(inner, text='Put files of unknown types in an "Other" folder', variable=self.other_var,
-                        command=self._on_options_changed, style="Cream.TCheckbutton").grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(p(10), 0))
+                        command=self._on_options_changed, style="Cream.TCheckbutton").pack(anchor="w", pady=(p(10), 0))
         self.shortcut_var = tk.BooleanVar(value=self.settings.skip_shortcuts)
         ttk.Checkbutton(inner, text="Leave shortcuts (.lnk, .url) where they are", variable=self.shortcut_var,
-                        command=self._on_options_changed, style="Cream.TCheckbutton").grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(p(4), 0))
+                        command=self._on_options_changed, style="Cream.TCheckbutton").pack(anchor="w", pady=(p(4), 0))
+        self.skipped_row = FlowFrame(inner, bg=CREAM, gap=self.px(14))  # filled by _refresh_skipped_row
+        self.skipped_row.pack(fill="x", pady=(p(10), 0))
 
         self.cat_scroll = ScrollFrame(view, bg=PAGE)
         self.cat_scroll.pack(fill="both", expand=True, padx=(p(28), p(14)), pady=(0, p(18)))
+        self._cat_cols = self._cat_columns_for(self.px(700))
+        self.cat_scroll.canvas.bind("<Configure>", self._on_cat_resize, add="+")
         return view
 
     def _build_history_view(self) -> tk.Frame:
@@ -1126,6 +1375,13 @@ class App(tk.Tk):
         return self.f_body.metrics("linespace") * lines + self.px(16) + 2 * self.px(3)
 
     @staticmethod
+    def _wrap(label: tk.Label) -> tk.Label:
+        """Let the label's text wrap to whatever width it gets, so nothing runs off the edge."""
+        label.configure(width=1, justify="left", anchor="w")
+        label.bind("<Configure>", lambda e: label.configure(wraplength=max(30, e.width - 4)), add="+")
+        return label
+
+    @staticmethod
     def _fit_on_resize(label: tk.Label, text: str, font: tkfont.Font, side: str = "end") -> None:
         """Show as much of `text` as fits the label's width, ending in "…" if it's cut (display only)."""
         label.configure(text=text)
@@ -1163,8 +1419,8 @@ class App(tk.Tk):
         inner = tk.Frame(box, bg=HINT_BG)
         inner.pack(fill="x", padx=p(16), pady=p(12))
         tk.Label(inner, image=self.sprites.get(art, 2), bg=HINT_BG).pack(side="left")
-        tk.Label(inner, text=text, font=self.f_body, bg=HINT_BG, fg=INK, justify="left", anchor="w",
-                 wraplength=p(600)).pack(side="left", padx=(p(14), 0), fill="x")
+        self._wrap(tk.Label(inner, text=text, font=self.f_body, bg=HINT_BG, fg=INK)).pack(
+            side="left", padx=(p(14), 0), fill="x", expand=True)
 
     def _panel_idle(self) -> None:
         if not self.settings.folders:
@@ -1178,49 +1434,232 @@ class App(tk.Tk):
 
     def _panel_plan(self) -> None:
         p = self.px
+        skip = set(self.settings.skipped_groups)
         groups: dict[tuple[str, str], list[tuple[str, engine.Move]]] = defaultdict(list)
-        targets = set()
         for folder, moves in self.plans.items():
             for m in moves:
                 groups[(m.rule, m.category)].append((folder, m))
-                targets.add(str(Path(m.dst).parent).lower() if m.rule else dest_label(m, folder).lower())
-        total = sum(len(v) for v in groups.values())
-        tk.Label(self.panel, text=f"The plan: {plural(total, 'file')} into {plural(len(targets), 'folder')}",
-                 font=self.f_h2, bg=PAGE, fg=INK, anchor="w").pack(fill="x", pady=(0, p(8)))
+
+        def excluded(items) -> bool:
+            return engine.is_excluded(items[0][1], skip)
+
+        moving = [fm for v in groups.values() if not excluded(v) for fm in v]
+        targets = {str(Path(m.dst).parent).lower() if m.rule else dest_label(m, f).lower() for f, m in moving}
+        n_excluded = sum(len(v) for v in groups.values()) - len(moving)
+        head = tk.Frame(self.panel, bg=PAGE)
+        head.pack(fill="x", pady=(0, p(8)))
+        tk.Label(head, text=f"The plan: {plural(len(moving), 'file')} into {plural(len(targets), 'folder')}",
+                 font=self.f_h2, bg=PAGE, fg=INK).pack(side="left")
+        if n_excluded:
+            tk.Label(head, text=f"   ({plural(n_excluded, 'file')} excluded)", font=self.f_body, bg=PAGE,
+                     fg=MUTED).pack(side="left", pady=(p(3), 0))
         holder, card = shadow_card(self.panel, self, bg=PAGE)
         holder.pack(fill="both", expand=True)
         scroller = ScrollFrame(card, bg=WHITE)
         scroller.pack(fill="both", expand=True)
-        # Course and code-word groups first, then file types, biggest first.
-        ordered = sorted(groups.items(), key=lambda kv: (kv[0][0] == "", -len(kv[1]), kv[0][1]))
-        for i, ((rule, cat), items) in enumerate(ordered):
-            row = tk.Frame(scroller.inner, bg=WHITE)
-            row.pack(fill="x")
-            if i:
-                tk.Frame(row, bg=LINE, height=p(2)).pack(fill="x")
-            inner = tk.Frame(row, bg=WHITE)
-            inner.pack(fill="x", padx=p(12), pady=p(8))
-            icon = {"course": "Course", "word": "Code word"}.get(rule, cat)
-            tk.Label(inner, image=self.category_sprite(icon), bg=WHITE).pack(side="left", anchor="n")
+
+        # All courses share one "Courses" row (with a dropdown); then code words, then file types,
+        # biggest first; excluded groups at the end.
+        courses = {k: v for k, v in groups.items() if k[0] == "course"}
+        others = {k: v for k, v in groups.items() if k[0] != "course"}
+        courses_moving = any(not excluded(v) for v in courses.values())
+        entries: list[tuple[str, object]] = []
+        if courses and courses_moving:
+            entries.append(("courses", None))
+        entries += [("group", kv) for kv in sorted(
+            ((k, v) for k, v in others.items() if not excluded(v)),
+            key=lambda kv: (kv[0][0] == "", -len(kv[1]), kv[0][1]))]
+        if courses and not courses_moving:
+            entries.append(("courses", None))
+        entries += [("group", kv) for kv in sorted(
+            ((k, v) for k, v in others.items() if excluded(v)), key=lambda kv: kv[0][1].lower())]
+        for i, (kind, payload) in enumerate(entries):
+            if kind == "courses":
+                self._plan_courses_row(scroller.inner, courses, skip, first=i == 0)
+            else:
+                (rule, cat), items = payload
+                self._plan_group_row(scroller.inner, rule, cat, items, excluded(items), first=i == 0)
+
+    def _plan_group_row(self, parent, rule: str, cat: str, items, is_excluded: bool, *, first: bool = False,
+                        indent: int = 0, child: bool = False, locked: bool = False) -> None:
+        """One group in the plan. `child`: a course inside the Courses dropdown.
+        `locked`: excluded because all courses are, so it has no link of its own."""
+        p = self.px
+        bg = SKIPPED_BG if is_excluded else WHITE
+        key = engine.group_key(items[0][1])
+        row = tk.Frame(parent, bg=bg)
+        row.pack(fill="x")
+        if not first:
+            tk.Frame(row, bg=LINE, height=p(1 if child else 2)).pack(fill="x")
+        inner = tk.Frame(row, bg=bg)
+        inner.pack(fill="x", padx=(p(12) + indent, p(12)), pady=p(6 if child else 8))
+        icon = {"course": "", "word": "Code word"}.get(rule, cat)  # a course is a folder: the plain folder logo
+        tk.Label(inner, image=self.category_sprite(icon, 1.5 if child else 2), bg=bg).pack(side="left", anchor="n")
+        if is_excluded:
+            tk.Label(inner, text="Left where it is", font=self.f_small_b, bg=bg, fg=MUTED, padx=p(6),
+                     pady=p(2), highlightthickness=p(2), highlightbackground=LINE).pack(side="right", anchor="n")
+        else:
             dests = sorted({dest_label(m, f) for f, m in items})
             chip = "→ " + ", ".join(dests[:2]) + (", ..." if len(dests) > 2 else "") + "\\"
-            tk.Label(inner, text=chip, font=self.f_small_b, bg=CHIP_BG, fg=CHIP_FG, padx=p(6), pady=p(2),
-                     highlightthickness=p(2), highlightbackground=BLUE).pack(side="right", anchor="n")
-            text = tk.Frame(inner, bg=WHITE)
-            text.pack(side="left", fill="x", expand=True, padx=p(12))
-            kind = {"course": "  ·  course", "word": "  ·  code word"}.get(rule, "")
-            tk.Label(text, text=f"{cat}  ·  {plural(len(items), 'file')}{kind}", font=self.f_body_b, bg=WHITE,
-                     fg=INK, anchor="w").pack(fill="x")
-            names = [Path(m.src).name for _, m in items]
-            shown = ", ".join(names[:3]) + (f"  + {len(names) - 3} more" if len(names) > 3 else "")
-            names_label = tk.Label(text, text=shown, font=self.f_small, bg=WHITE, fg=MUTED, anchor="w",
-                                   justify="left", wraplength=p(440))
-            names_label.pack(fill="x")
-            if len(names) > 3:
-                more = link(text, "Show all", lambda: None, app=self, bg=WHITE)
-                more.bind("<Button-1>", lambda e, l=names_label, n=names, m=more:
-                          (l.configure(text=", ".join(n)), m.destroy()))
-                more.pack(anchor="w")
+            chip_label = tk.Label(inner, text=chip, font=self.f_small_b, bg=CHIP_BG, fg=CHIP_FG, padx=p(6),
+                                  pady=p(2), highlightthickness=p(2), highlightbackground=BLUE)
+            chip_label.pack(side="right", anchor="n")
+            folders = sorted({str(self._dest_folder(m, f)) for f, m in items}, key=str.lower)
+            new = [d for d in folders if not Path(d).exists()]
+            Tooltip(chip_label, "Files go to:\n" + "\n".join(folders[:4]) +
+                    (f"\n...and {len(folders) - 4} more" if len(folders) > 4 else "") +
+                    ("\n\n(new folder: it'll be made when you click Tidy up!)" if new else ""), app=self)
+            if new:  # this tidy-up will create the folder: show it, and say so on hover
+                badge = tk.Label(inner, image=self.sprites.get("badges/new_folder.png", 1.5), bg=bg, cursor="question_arrow")
+                badge.pack(side="right", anchor="n", padx=(0, p(6)))
+                badge.image_name = "new_folder"  # for tests
+                Tooltip(badge, ("New folder: Tidy Folders will create\n" if len(new) == 1 else
+                                "New folders: Tidy Folders will create\n") + "\n".join(new[:4]) +
+                        "\nwhen you click Tidy up!", app=self)
+        text = tk.Frame(inner, bg=bg)
+        text.pack(side="left", fill="x", expand=True, padx=p(12))
+        kind = "  ·  code word" if rule == "word" else ""
+        self._wrap(tk.Label(text, text=f"{cat}  ·  {plural(len(items), 'file')}{kind}" +
+                            ("  ·  excluded" if is_excluded else ""), font=self.f_body_b, bg=bg,
+                            fg=MUTED if is_excluded else INK)).pack(fill="x")
+        names = [Path(m.src).name for _, m in items]
+        shown = ", ".join(names[:3]) + (f"  + {len(names) - 3} more" if len(names) > 3 else "")
+        names_label = self._wrap(tk.Label(text, text=shown, font=self.f_small, bg=bg, fg=MUTED))
+        names_label.pack(fill="x")
+        links = tk.Frame(text, bg=bg)
+        links.pack(anchor="w")
+        if len(names) > 3:
+            everything = ", ".join(names)
+            more = link(links, "Show all", lambda: None, app=self, bg=bg)
+
+            def flip(_event=None, label=names_label, toggle=more, short=shown, full=everything):
+                expanded = toggle.cget("text") == "Show less"
+                label.configure(text=short if expanded else full)
+                toggle.configure(text="Show all" if expanded else "Show less")
+            more.bind("<Button-1>", flip)
+            more.pack(side="left")
+            tk.Label(links, text=" · ", font=self.f_small, bg=bg, fg=MUTED).pack(side="left")
+        if locked:
+            tk.Label(links, text="excluded with all courses", font=self.f_small, bg=bg, fg=MUTED).pack(side="left")
+        elif is_excluded:
+            link(links, "Include again", lambda k=key: self._include_group(k), app=self, bg=bg).pack(side="left")
+        else:
+            link(links, "Exclude", lambda k=key: self._skip_group(k), app=self, bg=bg).pack(side="left")
+
+    @staticmethod
+    def _dest_folder(move: engine.Move, folder: str) -> Path:
+        """The folder a move puts its file in that you'd see in File Explorer: 'Downloads\\Code',
+        or the course / code-word folder itself."""
+        if move.rule:
+            return Path(move.dst).parent
+        return Path(folder) / Path(os.path.relpath(move.dst, folder)).parts[0]
+
+    def _plan_courses_row(self, parent, courses, skip: set[str], *, first: bool) -> None:
+        """The "Courses" row: all course folders together, with Exclude/Include all and a dropdown."""
+        p = self.px
+        all_out = engine.ALL_COURSES in skip
+        out = {k: engine.is_excluded(v[0][1], skip) for k, v in courses.items()}
+        n_courses, n_out = len(courses), sum(out.values())
+        fully_out = n_out == n_courses
+        files_total = sum(len(v) for v in courses.values())
+        files_moving = sum(len(v) for k, v in courses.items() if not out[k])
+        bg = SKIPPED_BG if fully_out else WHITE
+        row = tk.Frame(parent, bg=bg)
+        row.pack(fill="x")
+        if not first:
+            tk.Frame(row, bg=LINE, height=p(2)).pack(fill="x")
+        inner = tk.Frame(row, bg=bg)
+        inner.pack(fill="x", padx=p(12), pady=p(8))
+        tk.Label(inner, image=self.category_sprite("Course"), bg=bg).pack(side="left", anchor="n")
+        if fully_out:
+            tk.Label(inner, text="Left where they are", font=self.f_small_b, bg=bg, fg=MUTED, padx=p(6),
+                     pady=p(2), highlightthickness=p(2), highlightbackground=LINE).pack(side="right", anchor="n")
+        else:
+            chip = tk.Label(inner, text=f"→ {plural(n_courses - n_out, 'course folder')}", font=self.f_small_b,
+                            bg=CHIP_BG, fg=CHIP_FG, padx=p(6), pady=p(2), highlightthickness=p(2),
+                            highlightbackground=BLUE)
+            chip.pack(side="right", anchor="n")
+            where = sorted({str(Path(v[0][1].dst).parent) for k, v in courses.items() if not out[k]}, key=str.lower)
+            Tooltip(chip, "Course files go to their own course folders:\n" + "\n".join(where[:6]) +
+                    (f"\n...and {len(where) - 6} more" if len(where) > 6 else ""), app=self)
+        text = tk.Frame(inner, bg=bg)
+        text.pack(side="left", fill="x", expand=True, padx=p(12))
+        status = "  ·  excluded" if fully_out else (f"  ·  {n_out} excluded" if n_out else "")
+        self._wrap(tk.Label(text, text=f"Courses  ·  {plural(files_moving if not fully_out else files_total, 'file')}"
+                                       f"  ·  {plural(n_courses, 'course')}{status}",
+                            font=self.f_body_b, bg=bg, fg=MUTED if fully_out else INK)).pack(fill="x")
+        names = sorted((k[1] for k in courses), key=str.lower)
+        self._wrap(tk.Label(text, text=", ".join(names), font=self.f_small, bg=bg, fg=MUTED)).pack(fill="x")
+        links = tk.Frame(text, bg=bg)
+        links.pack(anchor="w")
+        toggle = link(links, "Hide courses ▴" if self.courses_expanded else "Show courses ▾", lambda: None,
+                      app=self, bg=bg)
+        toggle.pack(side="left")
+        if n_out:
+            tk.Label(links, text=" · ", font=self.f_small, bg=bg, fg=MUTED).pack(side="left")
+            link(links, "Include all courses", self._include_all_courses, app=self, bg=bg).pack(side="left")
+        if not fully_out:
+            tk.Label(links, text=" · ", font=self.f_small, bg=bg, fg=MUTED).pack(side="left")
+            link(links, "Exclude all courses", self._exclude_all_courses, app=self, bg=bg).pack(side="left")
+
+        children = tk.Frame(row, bg=WHITE)
+        for k, v in sorted(courses.items(), key=lambda kv: (out[kv[0]], -len(kv[1]), kv[0][1].lower())):
+            self._plan_group_row(children, "course", k[1], v, out[k], indent=p(48), child=True,
+                                 locked=all_out)
+        if self.courses_expanded:
+            children.pack(fill="x")
+
+        def flip(_event=None):
+            self.courses_expanded = not self.courses_expanded
+            if self.courses_expanded:
+                children.pack(fill="x")
+            else:
+                children.pack_forget()
+            toggle.configure(text="Hide courses ▴" if self.courses_expanded else "Show courses ▾")
+        toggle.bind("<Button-1>", flip)
+
+    # ------------------------------------------------------------------ skipping groups
+
+    @staticmethod
+    def _group_name(key: str) -> str:
+        kind, _, name = key.partition(":")
+        if key == engine.ALL_COURSES:
+            return "All courses"
+        if kind == "course":
+            return re.sub(r"^([A-Z]+)(\d)", r"\1 \2", name)
+        return f'"{name}"' if kind == "word" else name
+
+    def _skip_group(self, key: str) -> None:
+        if key not in self.settings.skipped_groups:
+            self.settings.skipped_groups.append(key)
+            self._save()
+        self._after_skips_changed(f"Excluded {self._group_name(key)}: those files will be left where they are.")
+
+    def _include_group(self, key: str) -> None:
+        if key in self.settings.skipped_groups:
+            self.settings.skipped_groups.remove(key)
+            self._save()
+        self._after_skips_changed(f"{self._group_name(key)} will be sorted again.")
+
+    def _exclude_all_courses(self) -> None:
+        if engine.ALL_COURSES not in self.settings.skipped_groups:
+            self.settings.skipped_groups.append(engine.ALL_COURSES)
+            self._save()
+        self._after_skips_changed("Excluded all courses: course files will be left where they are.")
+
+    def _include_all_courses(self) -> None:
+        """Sort every course again, including ones that were excluded one by one."""
+        self.settings.skipped_groups = [k for k in self.settings.skipped_groups if not k.startswith("course:")]
+        self._save()
+        self._after_skips_changed("All courses will be sorted again.")
+
+    def _after_skips_changed(self, message: str) -> None:
+        if self.phase == "preview" and not self.busy:
+            self._preview()
+        else:
+            self._refresh_everything()
+        self._refresh_categories()
+        self.status_var.set(message)
 
     def _panel_result(self) -> None:
         p = self.px
@@ -1241,11 +1680,9 @@ class App(tk.Tk):
             title = "All tidy!"
             line = f"Moved {plural(moved, 'file')} into folders. Changed your mind? Undo puts every one back."
         tk.Label(text, text=title, font=self.f_h2, bg=bg, fg=INK, anchor="w").pack(fill="x")
-        tk.Label(text, text=line, font=self.f_body, bg=bg, fg=INK, anchor="w", justify="left",
-                 wraplength=p(560)).pack(fill="x")
+        self._wrap(tk.Label(text, text=line, font=self.f_body, bg=bg, fg=INK)).pack(fill="x")
         for err in errors[:5]:
-            tk.Label(text, text="•  " + err, font=self.f_small, bg=bg, fg=MUTED, anchor="w", justify="left",
-                     wraplength=p(560)).pack(fill="x")
+            self._wrap(tk.Label(text, text="•  " + err, font=self.f_small, bg=bg, fg=MUTED)).pack(fill="x")
         if len(errors) > 5:
             tk.Label(text, text=f"...and {len(errors) - 5} more.", font=self.f_small, bg=bg, fg=MUTED,
                      anchor="w").pack(fill="x")
@@ -1388,7 +1825,7 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------ preview & sort
 
-    def _plan_all(self, quiet: bool = False) -> dict[str, list[engine.Move]]:
+    def _plan_all(self, quiet: bool = False, include_skipped: bool = False) -> dict[str, list[engine.Move]]:
         plans: dict[str, list[engine.Move]] = {}
         skipped = []
         for folder in self.settings.folders:
@@ -1396,7 +1833,7 @@ class App(tk.Tk):
             if problem:
                 skipped.append(f"{folder}: {problem}")
                 continue
-            moves = engine.plan_sort(folder, self.settings)
+            moves = engine.plan_sort(folder, self.settings, include_skipped=include_skipped)
             if moves:
                 plans[folder] = moves
         if skipped and not quiet:
@@ -1409,8 +1846,10 @@ class App(tk.Tk):
         if not self.settings.folders:
             self._add_folder_menu()
             return {}
-        self.plans = self._plan_all(quiet=True)
-        self.counts = {f: (None if engine.folder_problem(f) else len(self.plans.get(f, [])))
+        self.plans = self._plan_all(quiet=True, include_skipped=True)  # skipped groups are shown, greyed
+        skip = set(self.settings.skipped_groups)
+        self.counts = {f: (None if engine.folder_problem(f) else
+                           sum(1 for m in self.plans.get(f, []) if not engine.is_excluded(m, skip)))
                        for f in self.settings.folders}
         has_moves = any(self.plans.values())
         self.phase = "preview" if has_moves else "idle"
@@ -1429,10 +1868,11 @@ class App(tk.Tk):
             self._add_folder_menu()
             return
         previewed = self.phase == "preview"
-        plans = self._plan_all(quiet=True)
+        plans = self._plan_all(quiet=True)  # skipped groups left out
         total = sum(len(m) for m in plans.values())
         if total == 0:
             self.phase = "idle"
+            self._arm_auto()  # a Tidy up! with nothing to move still counts as the first one
             self._refresh_everything()
             self.status_var.set("Nothing to sort. Your folders are already tidy.")
             return
@@ -1454,6 +1894,7 @@ class App(tk.Tk):
         self.result = (moved, errors)
         self.phase = "problem" if errors else "done"
         self.plans = {}
+        self._arm_auto()  # the first Tidy up! after switching auto-sort on starts it
         self._scan()
         self._update_folder_cards()
         self._show_panel()
@@ -1564,18 +2005,18 @@ class App(tk.Tk):
         box = tk.Frame(card, bg=WHITE)
         box.pack(fill="x", padx=p(16), pady=p(14))
         tk.Label(box, text="Send files by name", font=self.f_h2, bg=WHITE, fg=INK, anchor="w").pack(fill="x")
-        tk.Label(box, text="Checked before file types: course folders first, then code words. Capitals, "
-                           "spaces, dashes and underscores don't matter, so ELECTENG101, electeng 101 and "
-                           "ElectEng_101 all count.", font=self.f_small, bg=WHITE, fg=MUTED, anchor="w",
-                 justify="left", wraplength=p(640)).pack(fill="x", pady=(p(2), p(10)))
+        self._wrap(tk.Label(box, text="Checked before file types: course folders first, then code words. Capitals, "
+                                      "spaces, dashes and underscores don't matter, so ELECTENG101, electeng 101 "
+                                      "and ElectEng_101 all count.", font=self.f_small, bg=WHITE, fg=MUTED)).pack(
+            fill="x", pady=(p(2), p(10)))
 
         def section(title, button_text, command, help_text):
             head = tk.Frame(box, bg=WHITE)
             head.pack(fill="x", pady=(p(4), 0))
             tk.Label(head, text=title, font=self.f_body_b, bg=WHITE, fg=INK).pack(side="left")
             PixelButton(head, button_text, command, app=self, bg=WHITE, pady=4).pack(side="right")
-            tk.Label(box, text=help_text, font=self.f_small, bg=WHITE, fg=MUTED, anchor="w", justify="left",
-                     wraplength=p(640)).pack(fill="x", pady=(p(2), p(6)))
+            self._wrap(tk.Label(box, text=help_text, font=self.f_small, bg=WHITE, fg=MUTED)).pack(
+                fill="x", pady=(p(2), p(6)))
 
         def rule_row(icon, title, detail, actions, detail_side="end"):
             row = tk.Frame(box, bg=CREAM, highlightthickness=p(2), highlightbackground=LINE)
@@ -1610,7 +2051,7 @@ class App(tk.Tk):
                       "No course folders inside yet (they're named after a course code, like ELECTENG 101)")
             if not Path(root).is_dir():
                 detail = "Can't find this folder any more."
-            rule_row("Course", root, detail,
+            rule_row("", root, detail,
                      [("Open", lambda r=root: self._open_folder(r)),
                       ("Remove", lambda r=root: self._remove_course_root(r))])
 
@@ -1626,14 +2067,39 @@ class App(tk.Tk):
                       ("Remove", lambda k=i: self._remove_keyword_rule(k))], detail_side="start")
         return holder
 
+    def _refresh_skipped_row(self) -> None:
+        """'Excluded: ELECTENG 101 (Include)  Other (Include)' on the Categories page; wraps to fit."""
+        row = self.skipped_row
+        row.clear()
+        if not self.settings.skipped_groups:
+            row.add(tk.Label(row, text="Nothing is excluded. To leave a group alone, click \"Exclude\" on it "
+                                       "in a Preview.", font=self.f_small, bg=CREAM, fg=MUTED))
+            return
+        row.add(tk.Label(row, text="Excluded (left where they are):", font=self.f_body_b, bg=CREAM, fg=INK))
+        for key in self.settings.skipped_groups:
+            item = tk.Frame(row, bg=CREAM)
+            tk.Label(item, text=self._group_name(key) + " ", font=self.f_body, bg=CREAM, fg=INK).pack(side="left")
+            link(item, "Include", lambda k=key: self._include_group(k), app=self, bg=CREAM).pack(side="left")
+            row.add(item)
+
+    def _cat_columns_for(self, width: int) -> int:
+        return 3 if width >= self.px(640) else 2
+
+    def _on_cat_resize(self, event) -> None:
+        cols = self._cat_columns_for(event.width)
+        if cols != self._cat_cols:  # the window got wider or narrower: re-flow the file-type cards
+            self._cat_cols = cols
+            self.after_idle(self._refresh_categories)
+
     def _refresh_categories(self) -> None:
         p = self.px
+        self._refresh_skipped_row()
         inner = self.cat_scroll.inner
         for widget in inner.winfo_children():
             widget.destroy()
-        cols = 3
-        for c in range(cols):
-            inner.columnconfigure(c, weight=1, uniform="cat")
+        cols = self._cat_cols
+        for c in range(3):
+            inner.columnconfigure(c, weight=1 if c < cols else 0, uniform="cat" if c < cols else "")
         self._build_name_rules_card(inner).grid(row=0, column=0, columnspan=cols, sticky="nsew",
                                                 padx=(0, p(14)), pady=(0, p(20)))
         tk.Label(inner, text="File types", font=self.f_h2, bg=PAGE, fg=INK, anchor="w").grid(
@@ -1648,20 +2114,39 @@ class App(tk.Tk):
             icon.pack(side="left", anchor="n")
             text = tk.Frame(row, bg=WHITE)
             text.pack(side="left", fill="x", expand=True, padx=(p(10), 0))
-            title = tk.Label(text, text=name, font=self.f_body_b, bg=WHITE, fg=INK, anchor="w")
+            title = self._wrap(tk.Label(text, text=name, font=self.f_body_b, bg=WHITE, fg=INK))
             title.pack(fill="x")
             if exts is None:
                 detail = ("Anything not listed in another category" if self.settings.other_folder
                           else "Unknown file types stay where they are (turned off above)")
             else:
                 detail = ", ".join(exts)
-            info = tk.Label(text, text=detail, font=self.f_small, bg=WHITE, fg=MUTED, anchor="w",
-                            justify="left", wraplength=p(150))
+            info = self._wrap(tk.Label(text, text=detail, font=self.f_small, bg=WHITE, fg=MUTED))
             info.pack(fill="x")
             if exts is not None:
                 for widget in (card, row, icon, text, title, info):
                     widget.configure(cursor="hand2")
                     widget.bind("<Button-1>", lambda e, n=name: self._edit_category(n))
+
+        # The last box in the grid adds a new file type.
+        i = len(entries)
+        holder, card = shadow_card(inner, self, bg=PAGE, fill=CREAM)
+        holder.grid(row=2 + i // cols, column=i % cols, sticky="nsew", padx=(0, p(14)), pady=(0, p(14)))
+        row = tk.Frame(card, bg=CREAM)
+        row.pack(fill="both", expand=True, padx=p(10), pady=p(10))
+        icon = tk.Label(row, image=self.sprites.compose("add", UPLOAD_TILE, 2), bg=CREAM)
+        icon.pack(side="left", anchor="n")
+        text = tk.Frame(row, bg=CREAM)
+        text.pack(side="left", fill="x", expand=True, padx=(p(10), 0))
+        title = self._wrap(tk.Label(text, text="Add file type", font=self.f_body_b, bg=CREAM, fg=INK))
+        title.pack(fill="x")
+        info = self._wrap(tk.Label(text, text="Your own folder, file types and logo", font=self.f_small,
+                                   bg=CREAM, fg=MUTED))
+        info.pack(fill="x")
+        for widget in (card, row, icon, text, title, info):
+            widget.configure(cursor="hand2")
+            widget.bind("<Button-1>", lambda e: self._add_category())
+        self.add_type_box = card
 
     def _validate_category(self, name: str, exts: list[str], original: str | None = None) -> str | None:
         error = engine.validate_category_name(name)
@@ -1691,36 +2176,56 @@ class App(tk.Tk):
 
     def _after_rules_changed(self) -> None:
         if self.phase == "preview":
-            self.plans = self._plan_all(quiet=True)
+            self.plans = self._plan_all(quiet=True, include_skipped=True)
             if not any(self.plans.values()):
                 self.phase = "idle"
         self._refresh_everything()
 
-    def _add_category(self) -> None:
-        dlg = CategoryDialog(self, "Add category", self._validate_category)
+    def _add_category(self, wait: bool = True) -> "CategoryDialog":
+        dlg = CategoryDialog(self, "Add file type", self._validate_category, wait=wait)
+        if wait:
+            self._finish_add_category(dlg)
+        return dlg
+
+    def _finish_add_category(self, dlg: "CategoryDialog") -> None:
         if dlg.result and dlg.result[0] == "save":
             _, name, exts = dlg.result
             self.settings.categories[name] = exts
+            spec = dlg.icon_spec()
+            if spec:
+                self.settings.category_icons[name] = spec
             self._categories_changed()
 
-    def _edit_category(self, old: str) -> None:
+    def _edit_category(self, old: str, wait: bool = True) -> "CategoryDialog | None":
         if old not in self.settings.categories:
-            return
-        dlg = CategoryDialog(self, "Edit category",
+            return None
+        dlg = CategoryDialog(self, "Edit file type",
                              lambda n, e: self._validate_category(n, e, original=old),
-                             name=old, exts=", ".join(self.settings.categories[old]), can_remove=True)
+                             name=old, exts=", ".join(self.settings.categories[old]), can_remove=True,
+                             icon=self.settings.category_icons.get(old), wait=wait)
+        if wait:
+            self._finish_edit_category(dlg, old)
+        return dlg
+
+    def _finish_edit_category(self, dlg: "CategoryDialog", old: str) -> None:
         if not dlg.result:
             return
         if dlg.result[0] == "remove":
-            if messagebox.askyesno(APP_NAME, f'Remove the "{old}" category?\n\n'
+            if messagebox.askyesno(APP_NAME, f'Remove the "{old}" file type?\n\n'
                                              "Files already sorted into that folder stay where they are.",
                                    parent=self):
                 del self.settings.categories[old]
+                self.settings.category_icons.pop(old, None)
                 self._categories_changed()
             return
         _, name, exts = dlg.result
         self.settings.categories = {(name if k == old else k): (exts if k == old else v)
                                     for k, v in self.settings.categories.items()}
+        spec = self.settings.category_icons.pop(old, None)
+        if dlg.icon_changed:
+            spec = dlg.icon_spec()
+        if spec:
+            self.settings.category_icons[name] = spec
         self._categories_changed()
 
     def _add_course_root(self) -> None:
@@ -1786,8 +2291,10 @@ class App(tk.Tk):
             self.status_var.set(f'Removed the code word "{rule["word"]}".')
 
     def _reset_categories(self) -> None:
-        if messagebox.askyesno(APP_NAME, "Replace your categories with the built-in ones?", parent=self):
+        if messagebox.askyesno(APP_NAME, "Replace your file types (and their logos) with the built-in ones?",
+                               parent=self):
             self.settings.categories = default_categories()
+            self.settings.category_icons = {}
             self._categories_changed()
 
     def _on_options_changed(self, *_args) -> None:
@@ -1808,11 +2315,13 @@ class App(tk.Tk):
     def _toggle_auto(self) -> None:
         if self.auto_var.get():
             if not messagebox.askyesno(
-                    APP_NAME, "Tidy Folders will now sort these folders by itself, without "
-                              f"asking first, every {self.interval_var.get()}.\n\n"
-                              "It never deletes anything, waits until new files are a minute old "
-                              "(so downloads can finish), and every sort can be undone from the "
-                              "History tab.\n\nTurn on automatic sorting?", parent=self):
+                    APP_NAME, "Automatic sorting keeps these folders tidy by itself.\n\n"
+                              "Nothing moves straight away: it starts after you click Tidy up! once, "
+                              "so the first tidy-up is always yours to check. After that, new files are "
+                              f"sorted every {self.interval_var.get()} without asking (each is left for a "
+                              "minute first, so downloads can finish).\n\n"
+                              "Nothing is ever deleted, and every sort can be undone from the History "
+                              "tab.\n\nTurn on automatic sorting?", parent=self):
                 self.auto_var.set(False)
                 self.auto_switch.set(False)
                 return
@@ -1822,18 +2331,29 @@ class App(tk.Tk):
             self._set_auto(False)
 
     def _set_auto(self, on: bool) -> None:
+        """Switch auto-sort on or off. Switching it on waits for the next Tidy up! before it runs."""
         self.settings.auto_sort = on
+        self.settings.auto_armed = False
         self.auto_var.set(on)
         self.auto_switch.set(on)
         self._save()
-        if on:
-            self._start_auto()
-        else:
-            self._stop_auto()
+        self._stop_auto()
         self._update_auto_label()
         self._update_mood()
         if self.tray:
             self.tray.refresh_menu()
+        if on:
+            self.status_var.set("Automatic sorting is on. It starts after you click Tidy up! once.")
+
+    def _arm_auto(self) -> None:
+        """After a Tidy up!, start auto-sort if it was switched on and waiting."""
+        if self.settings.auto_sort and not self.settings.auto_armed:
+            self.settings.auto_armed = True
+            self._save()
+            self._start_auto()
+            self._update_auto_label()
+            if self.tray:
+                self.tray.refresh_menu()
 
     def _start_auto(self) -> None:
         if self.auto:
@@ -1850,14 +2370,18 @@ class App(tk.Tk):
             self.auto = None
 
     def _update_auto_label(self) -> None:
-        if not self.auto:
-            self.auto_state_var.set("Off.")
-            self.auto_face.pack_forget()
-        else:
+        self.auto_face.pack_forget()
+        self.auto_wait.pack_forget()
+        if self.auto:
             self.auto_state_var.set("On. Keeps working in the tray after you close the window."
                                     if self.tray and self.settings.close_to_tray
                                     else "On. Runs while this window is open.")
             self.auto_face.pack(side="right")
+        elif self.settings.auto_sort:
+            self.auto_state_var.set("On, waiting: starts after you click Tidy up! once.")
+            self.auto_wait.pack(anchor="w", padx=self.px(14), pady=(self.px(2), 0), before=self.auto_row2)
+        else:
+            self.auto_state_var.set("Off.")
 
     def _on_interval_changed(self, *_args) -> None:
         self.settings.interval_seconds = dict(INTERVALS).get(self.interval_var.get(), 30)
@@ -1929,7 +2453,7 @@ class App(tk.Tk):
                 on_open=on_ui_thread(self._show_window),
                 on_sort_now=on_ui_thread(self._tray_sort_now),
                 on_toggle_auto=on_ui_thread(self._tray_toggle_auto),
-                is_auto_on=lambda: self.auto is not None,
+                is_auto_on=lambda: self.settings.auto_sort,
                 on_quit=on_ui_thread(self._quit),
             )
         except Exception:
@@ -1957,6 +2481,7 @@ class App(tk.Tk):
         plans = self._plan_all(quiet=True)
         total = sum(len(m) for m in plans.values())
         if total == 0:
+            self._arm_auto()
             self.tray.notify("Nothing to sort. Your folders are already tidy.")
             return
         batch = uuid.uuid4().hex[:12]
@@ -1977,13 +2502,12 @@ class App(tk.Tk):
                                 animate=self.state() != "withdrawn")
 
     def _tray_toggle_auto(self) -> None:
-        turn_on = self.auto is None
+        turn_on = not self.settings.auto_sort
         self._set_auto(turn_on)
         if self.tray:
             self.tray.notify(
-                f"Automatic sorting is on. Checking every {self.interval_var.get()}; "
-                "new files are left for a minute first." if turn_on
-                else "Automatic sorting is off.")
+                "Automatic sorting is on. It starts after you click Sort now (or Tidy up!) once."
+                if turn_on else "Automatic sorting is off.")
 
     def _listen_for_show_requests(self) -> None:
         """Opening Tidy Folders again (e.g. from the Start menu) shows this window."""
