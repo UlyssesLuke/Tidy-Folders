@@ -219,8 +219,9 @@ class Sprites:
         return self._cache[key]
 
 
-ICON_COLOURS = ["#C23B4A", "#D2582A", "#6B7F1A", "#2E8A57", "#0E8A8A",
+ICON_COLOURS = ["#C23B4A", "#D2582A", "#E09F00", "#2E8A57", "#0E8A8A",
                 "#1275B3", "#3949AB", "#7B4FA8", "#C74183"]  # white symbols stay readable on all of them
+                                                             # (the yellow is the folder tab's amber)
 UPLOAD_TILE = "#7A8086"
 
 
