@@ -1,0 +1,3 @@
+# Milliseconds each frame is shown, in order (Sorting_1.png, Sorting_2.png, ...).
+# Frames without a number here get 120 ms; the last one gets 300 ms.
+130, 110, 110, 110, 110, 140, 150, 320

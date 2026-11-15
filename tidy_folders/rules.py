@@ -63,6 +63,13 @@ class Settings:
     settle_seconds: int = 60        # files younger than this are left alone
     close_to_tray: bool = True      # closing the window hides it to the tray
     tray_hint_shown: bool = False   # "still running here" notice shown once
+    # Name rules, checked before file types:
+    course_roots: list[str] = field(default_factory=list)   # folders searched (at any depth) for course folders
+    keyword_rules: list[dict] = field(default_factory=list)  # [{"word": "invoice", "folder": "C:\\...\\Finance"}]
+    skipped_groups: list[str] = field(default_factory=list)  # left alone: "type:Other", "course:ELECTENG101"...
+    auto_armed: bool = False        # auto-sort only runs after the first Tidy up! once it's switched on
+    # Logos picked for file types: {"Games": {"glyph": 5, "colour": "#1275B3"}} or {"Games": {"file": "custom-1a2b.png"}}
+    category_icons: dict[str, dict] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Settings":
@@ -71,9 +78,25 @@ class Settings:
         for key, value in data.items():
             if key in known:
                 setattr(s, key, value)
+        if "auto_armed" not in data:  # settings from before this option: keep auto-sort working as it was
+            s.auto_armed = bool(s.auto_sort)
+        s.skipped_groups = ([str(g) for g in s.skipped_groups if isinstance(g, str)]
+                            if isinstance(s.skipped_groups, list) else [])
+        icons = {}
+        for name, spec in (s.category_icons.items() if isinstance(s.category_icons, dict) else []):
+            if isinstance(spec, dict) and isinstance(spec.get("file"), str):
+                icons[str(name)] = {"file": spec["file"]}
+            elif isinstance(spec, dict) and isinstance(spec.get("glyph"), int) and isinstance(spec.get("colour"), str):
+                icons[str(name)] = {"glyph": spec["glyph"], "colour": spec["colour"]}
+        s.category_icons = icons
         if s.mode not in MODES:
             s.mode = "type"
         s.folders = [str(f) for f in s.folders if isinstance(f, str)] if isinstance(s.folders, list) else []
+        s.course_roots = ([str(f) for f in s.course_roots if isinstance(f, str)]
+                          if isinstance(s.course_roots, list) else [])
+        s.keyword_rules = ([{"word": str(r["word"]), "folder": str(r["folder"])} for r in s.keyword_rules
+                            if isinstance(r, dict) and r.get("word") and r.get("folder")]
+                           if isinstance(s.keyword_rules, list) else [])
         if not isinstance(s.categories, dict) or not s.categories:
             s.categories = default_categories()
         s.categories = {
