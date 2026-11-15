@@ -36,6 +36,23 @@ the first time, because the file isn't code-signed. They can click
 4. **Automatic sorting:** tick the box and new files get sorted every few seconds.
    Files are left alone until they're a minute old, so downloads can finish.
 
+## Course folders and code words
+
+On the **Categories** page, under **Send files by name**:
+
+- **Course folders:** pick a folder that holds your course folders, like
+  `UoA\2026\Sem 2`. Any file whose name contains a course code goes into that
+  course's folder: `ELECTENG292_Lab1.pdf`, `electeng 292 notes.docx` and
+  `ElectEng_292.zip` all go to `Sem 2\ELECTENG 292`. Capitals, spaces, dashes and
+  underscores don't matter. Only folders whose names mix letters and numbers count
+  as codes, and a new course folder works straight away.
+- **Code words:** a word plus a folder, e.g. `invoice` → `Documents\Finance`.
+
+These are checked before file types: course folders first, then code words.
+Preview shows where each file will go, and Undo works the same as always.
+Optional art: `assets/categories/Course.png` and `Code word.png` (24×21) replace
+the neutral folder on those rows.
+
 ## Tray and start with Windows
 
 - **Closing the window** hides it to the tray (the icons next to the clock; on
@@ -51,6 +68,25 @@ the first time, because the file isn't code-signed. They can click
 
 The tray and start-up options are part of the .exe. When running from source they
 need `pip install -r requirements.txt` (tray) or aren't available (start-up).
+
+## Art and font
+
+All the pixel art lives in `tidy_folders/assets/`:
+
+| Folder | What it is |
+| --- | --- |
+| `faces/` | The folder buddy: happy, happy_tongue, sad, dead, smug, surprised, front, normal (24×21) |
+| `categories/` | One icon per category, named after it, e.g. `Images.png` (24×21) |
+| `nav/` | Sidebar icons (16×16) |
+| `button/` | The Tidy up! button: normal, hover, pressed (48×16) |
+| `switch/` | The auto-sort switch: on, off (20×10) |
+| `sparkle/` | Celebration sparkle frames 1-3 (8×8) |
+| `tray/` | Tray icons, 16.png and 32.png; `icon.ico` is made from these by `build.bat` |
+| `fonts/` | Pixelify Sans Bold, used for headings (SIL Open Font License, see `OFL.txt`) |
+
+To change a piece of art, replace its PNG with one the same size and rebuild. The app
+scales everything up by whole numbers, so pixels stay crisp. A new category without
+its own icon uses the neutral folder.
 
 ## Safety rules
 

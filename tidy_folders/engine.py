@@ -7,11 +7,20 @@ Safety rules:
   * Every sort is recorded so it can be undone.
   * Hidden/system files, shortcuts, Office lock files and unfinished
     downloads are skipped.
+
+Where a file goes, first match wins:
+  1. Course folders: a file whose name contains a course code (ELECTENG292,
+     "electeng 292", ELECTENG_292...) goes into the course folder of that name.
+  2. Code words: a file whose name contains the word goes to that word's folder.
+  3. File type: Images, Documents... (or Other).
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
+import re
+import shutil
 import stat
 import tempfile
 import threading
@@ -41,6 +50,7 @@ class Move:
     src: str
     dst: str
     category: str
+    rule: str = ""  # "course" or "word" when a name rule chose the folder, else ""
 
 
 # ---------------------------------------------------------------- checks
@@ -74,7 +84,22 @@ def folder_problem(folder: str | Path) -> str | None:
         return "This folder doesn't exist (anymore)."
     if not p.is_dir():
         return "This isn't a folder."
-    p = p.resolve()
+    return _protection_problem(p.resolve())
+
+
+def target_problem(folder: str | Path) -> str | None:
+    """Why a name rule can't send files to `folder` (which may not exist yet), or None."""
+    p = Path(folder)
+    if p.exists() and not p.is_dir():
+        return "That's a file, not a folder."
+    try:
+        p = p.resolve()
+    except OSError:
+        return "That folder can't be reached."
+    return _protection_problem(p)
+
+
+def _protection_problem(p: Path) -> str | None:
     if p == Path(p.anchor):
         return "Sorting a whole drive isn't allowed. Pick a specific folder, like Downloads."
     if p == Path.home().resolve():
@@ -115,6 +140,64 @@ def _should_skip(name: str, st: os.stat_result, settings: Settings,
     if min_age and now - st.st_mtime < min_age:
         return True
     return False
+
+
+# ---------------------------------------------------------------- name rules
+
+@dataclass
+class NameRule:
+    pattern: re.Pattern
+    folder: Path
+    label: str
+    kind: str  # "course" | "word"
+
+
+def code_pattern(text: str) -> re.Pattern | None:
+    """Match `text` inside a file name, ignoring capitals, spaces, dashes, dots and underscores.
+
+    "ELECTENG 292" matches ELECTENG292, electeng_292 and ElectEng-292, but not
+    ELECTENG2920 (a different number) or XELECTENG292 (part of another word).
+    """
+    chars = [c for c in text if c.isalnum()]
+    if len(chars) < 3:
+        return None
+    body = r"[\s_.\-]*".join(re.escape(c) for c in chars)
+    tail = r"(?!\d)" if chars[-1].isdigit() else ""
+    return re.compile(r"(?<![A-Za-z0-9])" + body + tail, re.IGNORECASE)
+
+
+def looks_like_code(name: str) -> bool:
+    """Course-code folder names mix letters and numbers (ELECTENG 292), unlike "2026" or "Notes"."""
+    chars = [c for c in name if c.isalnum()]
+    return len(chars) >= 5 and any(c.isalpha() for c in chars) and any(c.isdigit() for c in chars)
+
+
+def course_folders(root: str | Path) -> list[Path]:
+    """The course folders inside a course root, e.g. Sem 2 -> [ELECTENG 204, ELECTENG 292, ...]."""
+    try:
+        subs = [p for p in Path(root).iterdir() if p.is_dir() and looks_like_code(p.name)]
+    except OSError:
+        return []
+    return sorted(subs, key=lambda p: p.name.lower())
+
+
+def build_name_rules(settings: Settings) -> list[NameRule]:
+    rules: list[NameRule] = []
+    for root in settings.course_roots:
+        for sub in course_folders(root):
+            pattern = code_pattern(sub.name)
+            if pattern:
+                rules.append(NameRule(pattern, sub, sub.name, "course"))
+    for rule in settings.keyword_rules:
+        pattern = code_pattern(rule["word"])
+        if pattern:
+            rules.append(NameRule(pattern, Path(rule["folder"]), rule["word"], "word"))
+    return rules
+
+
+def match_name_rule(name: str, rules: list[NameRule]) -> NameRule | None:
+    stem = Path(name).stem
+    return next((r for r in rules if r.pattern.search(stem)), None)
 
 
 # ---------------------------------------------------------------- planning
@@ -159,6 +242,12 @@ def plan_sort(folder: str | Path, settings: Settings,
     siblings = {e.name.lower() for e in entries}
     reserved: set[str] = set()
     moves: list[Move] = []
+    rules = build_name_rules(settings)
+    blocked: dict[Path, bool] = {}  # rule folders that are unsafe, or the folder being sorted itself
+    try:
+        here = folder.resolve()
+    except OSError:
+        here = folder
 
     for entry in sorted(entries, key=lambda e: e.name.lower()):
         try:
@@ -168,6 +257,20 @@ def plan_sort(folder: str | Path, settings: Settings,
         except OSError:
             continue
         if _should_skip(entry.name, st, settings, siblings, now, min_age):
+            continue
+
+        rule = match_name_rule(entry.name, rules)
+        if rule is not None:
+            if rule.folder not in blocked:
+                try:
+                    same = rule.folder.resolve() == here
+                except OSError:
+                    same = False
+                blocked[rule.folder] = same or target_problem(rule.folder) is not None
+            if blocked[rule.folder]:
+                continue  # already where it belongs, or the rule points somewhere unsafe: leave it
+            dst = unique_destination(rule.folder / entry.name, reserved)
+            moves.append(Move(entry.path, str(dst), rule.label, rule.kind))
             continue
 
         category = ext_map.get(extension(entry.name))
@@ -194,6 +297,34 @@ def describe_error(err: OSError) -> str:
     if isinstance(err, FileNotFoundError):
         return "it's no longer there"
     return err.strerror or str(err)
+
+
+def _is_cross_drive(err: OSError) -> bool:
+    return getattr(err, "winerror", None) == 17 or err.errno == errno.EXDEV  # ERROR_NOT_SAME_DEVICE
+
+
+def _move_file(src: Path, dst: Path) -> None:
+    """Rename (instant) when possible; copy then delete when the folders are on different drives.
+
+    Never overwrites: fails if `dst` exists. If the original can't be removed after
+    copying, the copy is removed again so the file isn't left in two places.
+    """
+    if dst.exists():
+        raise FileExistsError(errno.EEXIST, "a file with that name is already there", str(dst))
+    try:
+        os.rename(src, dst)
+    except OSError as e:
+        if not _is_cross_drive(e):
+            raise
+        shutil.copy2(src, dst)
+        try:
+            os.remove(src)
+        except OSError:
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
+            raise
 
 
 def _make_dirs(path: Path, created: list[str]) -> None:
@@ -227,8 +358,8 @@ def apply_moves(moves: list[Move], folder: str | Path, source: str = "manual",
                 _make_dirs(dst.parent, created)
                 if dst.exists():  # something appeared since the plan was made
                     dst = unique_destination(dst, set())
-                os.rename(src, dst)  # same folder tree = instant, never overwrites on Windows
-                done.append({"src": str(src), "dst": str(dst), "category": m.category})
+                _move_file(src, dst)
+                done.append({"src": str(src), "dst": str(dst), "category": m.category, "rule": m.rule})
             except OSError as e:
                 errors.append(f"{src.name}: {describe_error(e)}")
         # Drop any folder we made that ended up empty (its file couldn't move).
@@ -272,7 +403,7 @@ def undo_run(run: dict) -> tuple[int, list[str]]:
                                 f"so it came back as \"{target.name}\"")
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                os.rename(dst, target)
+                _move_file(dst, target)
                 restored += 1
             except OSError as e:
                 problems.append(f"{dst.name}: {describe_error(e)}")

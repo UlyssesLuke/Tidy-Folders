@@ -63,6 +63,9 @@ class Settings:
     settle_seconds: int = 60        # files younger than this are left alone
     close_to_tray: bool = True      # closing the window hides it to the tray
     tray_hint_shown: bool = False   # "still running here" notice shown once
+    # Name rules, checked before file types:
+    course_roots: list[str] = field(default_factory=list)   # e.g. ...\UoA\2026\Sem 2: its subfolders are course codes
+    keyword_rules: list[dict] = field(default_factory=list)  # [{"word": "invoice", "folder": "C:\\...\\Finance"}]
 
     @classmethod
     def from_dict(cls, data: dict) -> "Settings":
@@ -74,6 +77,11 @@ class Settings:
         if s.mode not in MODES:
             s.mode = "type"
         s.folders = [str(f) for f in s.folders if isinstance(f, str)] if isinstance(s.folders, list) else []
+        s.course_roots = ([str(f) for f in s.course_roots if isinstance(f, str)]
+                          if isinstance(s.course_roots, list) else [])
+        s.keyword_rules = ([{"word": str(r["word"]), "folder": str(r["folder"])} for r in s.keyword_rules
+                            if isinstance(r, dict) and r.get("word") and r.get("folder")]
+                           if isinstance(s.keyword_rules, list) else [])
         if not isinstance(s.categories, dict) or not s.categories:
             s.categories = default_categories()
         s.categories = {
