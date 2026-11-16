@@ -5,7 +5,7 @@ import copy
 import threading
 from typing import Callable
 
-from . import engine
+from . import crashlog, engine
 from .rules import Settings
 
 
@@ -67,7 +67,8 @@ class AutoSorter:
         while not self._stop.is_set():
             try:
                 self.sort_once()
-            except Exception as e:  # keep the thread alive no matter what
+            except Exception as e:  # keep the thread alive no matter what (details go to error.log)
+                crashlog.write(type(e), e, e.__traceback__, "auto-sort")
                 self._on_run({"folder": "", "moves": []}, [f"Auto-sort hit a problem: {e}"])
             self._wake.wait(self._snapshot().interval_seconds)
             self._wake.clear()
