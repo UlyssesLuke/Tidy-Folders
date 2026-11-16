@@ -184,29 +184,31 @@ class Sprites:
 
     def __init__(self, master: tk.Misc, scale: float):
         self.master, self.scale = master, scale
-        self._cache: dict[tuple[str, int], tk.PhotoImage] = {}
+        self._cache: dict[tuple[str, int, bool], tk.PhotoImage] = {}
 
     def zoom_for(self, base: float) -> int:
         return max(1, int(base * self.scale + 0.5))
 
-    def get(self, rel: str, base_zoom: float = 1) -> tk.PhotoImage:
-        """`rel` is a path inside assets/, or a full path (e.g. an uploaded logo)."""
+    def get(self, rel: str, base_zoom: float = 1, trim: bool = False) -> tk.PhotoImage:
+        """`rel` is a path inside assets/, or a full path (e.g. an uploaded logo).
+        `trim` drops see-through edges, so a border drawn around the picture hugs it."""
         zoom = self.zoom_for(base_zoom)
-        key = (rel, zoom)
+        key = (rel, zoom, trim)
         if key not in self._cache:
             path = Path(rel) if Path(rel).is_absolute() else ASSETS / rel
             try:
                 img = tk.PhotoImage(master=self.master, file=str(path))
             except tk.TclError:  # missing art: a blank stand-in rather than a crash
                 img = tk.PhotoImage(master=self.master, width=24, height=21)
-            self._cache[key] = img.zoom(zoom) if zoom > 1 else img
+            self._cache[key] = self._finish(img, zoom, trim)
         return self._cache[key]
 
-    def compose(self, glyph: str, colour: str, base_zoom: float = 1) -> tk.PhotoImage:
+    def compose(self, glyph: str, colour: str, base_zoom: float = 1, trim: bool = False) -> tk.PhotoImage:
         """A file-type logo: a white symbol (assets/glyphs/<glyph>.png, 16x14) on a coloured
-        tile, laid out like the built-in category icons (24x21)."""
+        tile, laid out like the built-in category icons (24x21, with a see-through strip
+        2px wide down each side; `trim` drops those strips)."""
         zoom = self.zoom_for(base_zoom)
-        key = (f"compose:{glyph}:{colour}", zoom)
+        key = (f"compose:{glyph}:{colour}", zoom, trim)
         if key not in self._cache:
             img = tk.PhotoImage(master=self.master, width=24, height=21)
             img.put(colour, to=(2, 0, 22, 21))
@@ -215,9 +217,35 @@ class Sprites:
                 img.tk.call(img, "copy", symbol, "-to", 4, 3, "-compositingrule", "overlay")
             except tk.TclError:
                 pass
-            self._cache[key] = img.zoom(zoom) if zoom > 1 else img
+            self._cache[key] = self._finish(img, zoom, trim)
         return self._cache[key]
 
+    def _finish(self, img: tk.PhotoImage, zoom: int, trim: bool) -> tk.PhotoImage:
+        if trim:
+            img = self._trimmed(img)
+        return img.zoom(zoom) if zoom > 1 else img
+
+    def _trimmed(self, img: tk.PhotoImage) -> tk.PhotoImage:
+        """`img` cut down to the box around its visible (not see-through) pixels."""
+        w, h = img.width(), img.height()
+        seen = lambda x, y: not img.transparency_get(x, y)  # noqa: E731
+        cols = [x for x in range(w) if any(seen(x, y) for y in range(h))]
+        rows = [y for y in range(h) if any(seen(x, y) for x in range(w))]
+        if not cols or (len(cols), len(rows)) == (w, h):
+            return img
+        x1, y1, x2, y2 = cols[0], rows[0], cols[-1] + 1, rows[-1] + 1
+        out = tk.PhotoImage(master=self.master, width=x2 - x1, height=y2 - y1)
+        out.tk.call(out, "copy", img, "-from", x1, y1, x2, y2)
+        return out
+
+
+# Plan rows that gather every course / every code word into one row, with a dropdown.
+BUNDLES = {
+    "course": {"title": "Courses", "noun": "course", "icon": "Course", "all": engine.ALL_COURSES,
+               "dest_noun": "course folder", "tip": "Course files go to their own course folders:"},
+    "word": {"title": "Code words", "noun": "code word", "icon": "Code word", "all": engine.ALL_WORDS,
+             "dest_noun": "folder", "tip": "Files with a code word in their name go to:"},
+}
 
 ICON_COLOURS = ["#C23B4A", "#D2582A", "#E09F00", "#2E8A57", "#0E8A8A",
                 "#1275B3", "#3949AB", "#7B4FA8", "#C74183"]  # white symbols stay readable on all of them
@@ -647,15 +675,17 @@ class CategoryDialog(tk.Toplevel):
 
     def _refresh_picker(self) -> None:
         app = self.app
-        for i, tile in enumerate(self.tiles):
+        # The "chosen" box is blue, or ink on blue tiles (where blue wouldn't show).
+        ring = INK if self.colour.upper() == BLUE.upper() else BLUE
+        for i, tile in enumerate(self.tiles):  # trimmed, so the box hugs the tile
             if i < 8:
-                tile.configure(image=app.sprites.compose(str(i + 1), self.colour, 2))
+                tile.configure(image=app.sprites.compose(str(i + 1), self.colour, 2, trim=True))
                 chosen = not self.file and self.glyph == i + 1
             else:
-                tile.configure(image=app.icon_image({"file": self.file}, base_zoom=2) if self.file
-                               else app.sprites.compose("upload", UPLOAD_TILE, 2))
+                tile.configure(image=app.icon_image({"file": self.file}, base_zoom=2, trim=True) if self.file
+                               else app.sprites.compose("upload", UPLOAD_TILE, 2, trim=True))
                 chosen = bool(self.file)
-            tile.configure(highlightbackground=BLUE if chosen else PAGE)
+            tile.configure(highlightbackground=(ring if i < 8 else BLUE) if chosen else PAGE)
         b = app.px(3)
         for sw, colour in self.swatches:
             sw.delete("all")
@@ -799,7 +829,7 @@ class App(tk.Tk):
         self.result: tuple[int, list[str]] = (0, [])
         self.celebrating = False
         self.mascot_hover = False
-        self.courses_expanded = False   # the Courses dropdown in the preview
+        self.expanded = {kind: False for kind in BUNDLES}  # the Courses / Code words dropdowns in the preview
         self.animating = False          # the sorting animation is playing on the buddy
         self._anim_frames: list[tuple[str, int]] | None = None
         self._anim_index = 0
@@ -920,15 +950,16 @@ class App(tk.Tk):
         """A file type's logo: the one picked for it, else its built-in art, else the plain folder."""
         return self.icon_image(self.settings.category_icons.get(name), name, base_zoom)
 
-    def icon_image(self, spec: dict | None, name: str = "", base_zoom: float = 2) -> tk.PhotoImage:
+    def icon_image(self, spec: dict | None, name: str = "", base_zoom: float = 2,
+                   trim: bool = False) -> tk.PhotoImage:
         if spec and spec.get("file"):
             path = icons_dir() / spec["file"]
             if path.exists():
-                return self.sprites.get(str(path), base_zoom)
+                return self.sprites.get(str(path), base_zoom, trim)
         elif spec and spec.get("glyph"):
-            return self.sprites.compose(str(spec["glyph"]), spec.get("colour", ICON_COLOURS[0]), base_zoom)
+            return self.sprites.compose(str(spec["glyph"]), spec.get("colour", ICON_COLOURS[0]), base_zoom, trim)
         art = f"categories/{name}.png"
-        return self.sprites.get(art if name and (ASSETS / art).exists() else "faces/front.png", base_zoom)
+        return self.sprites.get(art if name and (ASSETS / art).exists() else "faces/front.png", base_zoom, trim)
 
     # ------------------------------------------------------------------ layout
 
@@ -1459,32 +1490,29 @@ class App(tk.Tk):
         scroller = ScrollFrame(card, bg=WHITE)
         scroller.pack(fill="both", expand=True)
 
-        # All courses share one "Courses" row (with a dropdown); then code words, then file types,
-        # biggest first; excluded groups at the end.
-        courses = {k: v for k, v in groups.items() if k[0] == "course"}
-        others = {k: v for k, v in groups.items() if k[0] != "course"}
-        courses_moving = any(not excluded(v) for v in courses.values())
-        entries: list[tuple[str, object]] = []
-        if courses and courses_moving:
-            entries.append(("courses", None))
+        # All courses share one "Courses" row and all code words one "Code words" row (each with a
+        # dropdown); then file types, biggest first; excluded groups at the end.
+        bundles = {kind: {k: v for k, v in groups.items() if k[0] == kind} for kind in BUNDLES}
+        others = {k: v for k, v in groups.items() if k[0] not in BUNDLES}
+        moving_bundles = [kind for kind, g in bundles.items() if any(not excluded(v) for v in g.values())]
+        entries: list[tuple[str, object]] = [("bundle", kind) for kind in moving_bundles]
         entries += [("group", kv) for kv in sorted(
             ((k, v) for k, v in others.items() if not excluded(v)),
             key=lambda kv: (kv[0][0] == "", -len(kv[1]), kv[0][1]))]
-        if courses and not courses_moving:
-            entries.append(("courses", None))
+        entries += [("bundle", kind) for kind, g in bundles.items() if g and kind not in moving_bundles]
         entries += [("group", kv) for kv in sorted(
             ((k, v) for k, v in others.items() if excluded(v)), key=lambda kv: kv[0][1].lower())]
         for i, (kind, payload) in enumerate(entries):
-            if kind == "courses":
-                self._plan_courses_row(scroller.inner, courses, skip, first=i == 0)
+            if kind == "bundle":
+                self._plan_bundle_row(scroller.inner, payload, bundles[payload], skip, first=i == 0)
             else:
                 (rule, cat), items = payload
                 self._plan_group_row(scroller.inner, rule, cat, items, excluded(items), first=i == 0)
 
     def _plan_group_row(self, parent, rule: str, cat: str, items, is_excluded: bool, *, first: bool = False,
                         indent: int = 0, child: bool = False, locked: bool = False) -> None:
-        """One group in the plan. `child`: a course inside the Courses dropdown.
-        `locked`: excluded because all courses are, so it has no link of its own."""
+        """One group in the plan. `child`: a course or code word inside the Courses / Code words
+        dropdown. `locked`: excluded because all of them are, so it has no link of its own."""
         p = self.px
         bg = SKIPPED_BG if is_excluded else WHITE
         key = engine.group_key(items[0][1])
@@ -1494,7 +1522,7 @@ class App(tk.Tk):
             tk.Frame(row, bg=LINE, height=p(1 if child else 2)).pack(fill="x")
         inner = tk.Frame(row, bg=bg)
         inner.pack(fill="x", padx=(p(12) + indent, p(12)), pady=p(6 if child else 8))
-        icon = {"course": "", "word": "Code word"}.get(rule, cat)  # a course is a folder: the plain folder logo
+        icon = "" if rule in BUNDLES else cat  # a course / code word goes to its own folder: the plain folder logo
         tk.Label(inner, image=self.category_sprite(icon, 1.5 if child else 2), bg=bg).pack(side="left", anchor="n")
         if is_excluded:
             tk.Label(inner, text="Left where it is", font=self.f_small_b, bg=bg, fg=MUTED, padx=p(6),
@@ -1511,16 +1539,10 @@ class App(tk.Tk):
                     (f"\n...and {len(folders) - 4} more" if len(folders) > 4 else "") +
                     ("\n\n(new folder: it'll be made when you click Tidy up!)" if new else ""), app=self)
             if new:  # this tidy-up will create the folder: show it, and say so on hover
-                badge = tk.Label(inner, image=self.sprites.get("badges/new_folder.png", 1.5), bg=bg, cursor="question_arrow")
-                badge.pack(side="right", anchor="n", padx=(0, p(6)))
-                badge.image_name = "new_folder"  # for tests
-                Tooltip(badge, ("New folder: Tidy Folders will create\n" if len(new) == 1 else
-                                "New folders: Tidy Folders will create\n") + "\n".join(new[:4]) +
-                        "\nwhen you click Tidy up!", app=self)
+                self._new_folder_badge(inner, bg, new)
         text = tk.Frame(inner, bg=bg)
         text.pack(side="left", fill="x", expand=True, padx=p(12))
-        kind = "  ·  code word" if rule == "word" else ""
-        self._wrap(tk.Label(text, text=f"{cat}  ·  {plural(len(items), 'file')}{kind}" +
+        self._wrap(tk.Label(text, text=f"{cat}  ·  {plural(len(items), 'file')}" +
                             ("  ·  excluded" if is_excluded else ""), font=self.f_body_b, bg=bg,
                             fg=MUTED if is_excluded else INK)).pack(fill="x")
         names = [Path(m.src).name for _, m in items]
@@ -1541,7 +1563,8 @@ class App(tk.Tk):
             more.pack(side="left")
             tk.Label(links, text=" · ", font=self.f_small, bg=bg, fg=MUTED).pack(side="left")
         if locked:
-            tk.Label(links, text="excluded with all courses", font=self.f_small, bg=bg, fg=MUTED).pack(side="left")
+            tk.Label(links, text=f"excluded with all {BUNDLES[rule]['title'].lower()}", font=self.f_small, bg=bg,
+                     fg=MUTED).pack(side="left")
         elif is_excluded:
             link(links, "Include again", lambda k=key: self._include_group(k), app=self, bg=bg).pack(side="left")
         else:
@@ -1555,15 +1578,26 @@ class App(tk.Tk):
             return Path(move.dst).parent
         return Path(folder) / Path(os.path.relpath(move.dst, folder)).parts[0]
 
-    def _plan_courses_row(self, parent, courses, skip: set[str], *, first: bool) -> None:
-        """The "Courses" row: all course folders together, with Exclude/Include all and a dropdown."""
+    def _new_folder_badge(self, parent, bg: str, new: list[str]) -> None:
+        """The folder-with-a-plus symbol: this tidy-up will create these folders. Says so on hover."""
+        badge = tk.Label(parent, image=self.sprites.get("badges/new_folder.png", 1.5), bg=bg, cursor="question_arrow")
+        badge.pack(side="right", anchor="n", padx=(0, self.px(6)))
+        badge.image_name = "new_folder"  # for tests
+        Tooltip(badge, ("New folder: Tidy Folders will create\n" if len(new) == 1 else
+                        "New folders: Tidy Folders will create\n") + "\n".join(new[:4]) +
+                (f"\n...and {len(new) - 4} more" if len(new) > 4 else "") + "\nwhen you click Tidy up!", app=self)
+
+    def _plan_bundle_row(self, parent, kind: str, groups, skip: set[str], *, first: bool) -> None:
+        """The "Courses" or "Code words" row: every course / code word together, with
+        Exclude all / Include all and a dropdown listing each one."""
         p = self.px
-        all_out = engine.ALL_COURSES in skip
-        out = {k: engine.is_excluded(v[0][1], skip) for k, v in courses.items()}
-        n_courses, n_out = len(courses), sum(out.values())
-        fully_out = n_out == n_courses
-        files_total = sum(len(v) for v in courses.values())
-        files_moving = sum(len(v) for k, v in courses.items() if not out[k])
+        b = BUNDLES[kind]
+        all_out = b["all"] in skip
+        out = {k: engine.is_excluded(v[0][1], skip) for k, v in groups.items()}
+        n_groups, n_out = len(groups), sum(out.values())
+        fully_out = n_out == n_groups
+        files_total = sum(len(v) for v in groups.values())
+        files_moving = sum(len(v) for k, v in groups.items() if not out[k])
         bg = SKIPPED_BG if fully_out else WHITE
         row = tk.Frame(parent, bg=bg)
         row.pack(fill="x")
@@ -1571,52 +1605,58 @@ class App(tk.Tk):
             tk.Frame(row, bg=LINE, height=p(2)).pack(fill="x")
         inner = tk.Frame(row, bg=bg)
         inner.pack(fill="x", padx=p(12), pady=p(8))
-        tk.Label(inner, image=self.category_sprite("Course"), bg=bg).pack(side="left", anchor="n")
+        tk.Label(inner, image=self.category_sprite(b["icon"]), bg=bg).pack(side="left", anchor="n")
         if fully_out:
             tk.Label(inner, text="Left where they are", font=self.f_small_b, bg=bg, fg=MUTED, padx=p(6),
                      pady=p(2), highlightthickness=p(2), highlightbackground=LINE).pack(side="right", anchor="n")
         else:
-            chip = tk.Label(inner, text=f"→ {plural(n_courses - n_out, 'course folder')}", font=self.f_small_b,
+            where = sorted({str(self._dest_folder(m, f)) for k, v in groups.items() if not out[k] for f, m in v},
+                           key=str.lower)
+            chip = tk.Label(inner, text=f"→ {plural(len(where), b['dest_noun'])}", font=self.f_small_b,
                             bg=CHIP_BG, fg=CHIP_FG, padx=p(6), pady=p(2), highlightthickness=p(2),
                             highlightbackground=BLUE)
             chip.pack(side="right", anchor="n")
-            where = sorted({str(Path(v[0][1].dst).parent) for k, v in courses.items() if not out[k]}, key=str.lower)
-            Tooltip(chip, "Course files go to their own course folders:\n" + "\n".join(where[:6]) +
+            Tooltip(chip, b["tip"] + "\n" + "\n".join(where[:6]) +
                     (f"\n...and {len(where) - 6} more" if len(where) > 6 else ""), app=self)
+            new = [d for d in where if not Path(d).exists()]
+            if new:
+                self._new_folder_badge(inner, bg, new)
         text = tk.Frame(inner, bg=bg)
         text.pack(side="left", fill="x", expand=True, padx=p(12))
         status = "  ·  excluded" if fully_out else (f"  ·  {n_out} excluded" if n_out else "")
-        self._wrap(tk.Label(text, text=f"Courses  ·  {plural(files_moving if not fully_out else files_total, 'file')}"
-                                       f"  ·  {plural(n_courses, 'course')}{status}",
+        self._wrap(tk.Label(text, text=f"{b['title']}  ·  {plural(files_moving if not fully_out else files_total, 'file')}"
+                                       f"  ·  {plural(n_groups, b['noun'])}{status}",
                             font=self.f_body_b, bg=bg, fg=MUTED if fully_out else INK)).pack(fill="x")
-        names = sorted((k[1] for k in courses), key=str.lower)
+        names = sorted((k[1] for k in groups), key=str.lower)
         self._wrap(tk.Label(text, text=", ".join(names), font=self.f_small, bg=bg, fg=MUTED)).pack(fill="x")
         links = tk.Frame(text, bg=bg)
         links.pack(anchor="w")
-        toggle = link(links, "Hide courses ▴" if self.courses_expanded else "Show courses ▾", lambda: None,
-                      app=self, bg=bg)
+        title = b["title"].lower()
+
+        def toggle_text() -> str:
+            return f"Hide {title} ▴" if self.expanded[kind] else f"Show {title} ▾"
+        toggle = link(links, toggle_text(), lambda: None, app=self, bg=bg)
         toggle.pack(side="left")
         if n_out:
             tk.Label(links, text=" · ", font=self.f_small, bg=bg, fg=MUTED).pack(side="left")
-            link(links, "Include all courses", self._include_all_courses, app=self, bg=bg).pack(side="left")
+            link(links, f"Include all {title}", lambda: self._include_all(kind), app=self, bg=bg).pack(side="left")
         if not fully_out:
             tk.Label(links, text=" · ", font=self.f_small, bg=bg, fg=MUTED).pack(side="left")
-            link(links, "Exclude all courses", self._exclude_all_courses, app=self, bg=bg).pack(side="left")
+            link(links, f"Exclude all {title}", lambda: self._exclude_all(kind), app=self, bg=bg).pack(side="left")
 
         children = tk.Frame(row, bg=WHITE)
-        for k, v in sorted(courses.items(), key=lambda kv: (out[kv[0]], -len(kv[1]), kv[0][1].lower())):
-            self._plan_group_row(children, "course", k[1], v, out[k], indent=p(48), child=True,
-                                 locked=all_out)
-        if self.courses_expanded:
+        for k, v in sorted(groups.items(), key=lambda kv: (out[kv[0]], -len(kv[1]), kv[0][1].lower())):
+            self._plan_group_row(children, kind, k[1], v, out[k], indent=p(48), child=True, locked=all_out)
+        if self.expanded[kind]:
             children.pack(fill="x")
 
         def flip(_event=None):
-            self.courses_expanded = not self.courses_expanded
-            if self.courses_expanded:
+            self.expanded[kind] = not self.expanded[kind]
+            if self.expanded[kind]:
                 children.pack(fill="x")
             else:
                 children.pack_forget()
-            toggle.configure(text="Hide courses ▴" if self.courses_expanded else "Show courses ▾")
+            toggle.configure(text=toggle_text())
         toggle.bind("<Button-1>", flip)
 
     # ------------------------------------------------------------------ skipping groups
@@ -1624,8 +1664,8 @@ class App(tk.Tk):
     @staticmethod
     def _group_name(key: str) -> str:
         kind, _, name = key.partition(":")
-        if key == engine.ALL_COURSES:
-            return "All courses"
+        if name == "*" and kind in BUNDLES:
+            return "All " + BUNDLES[kind]["title"].lower()
         if kind == "course":
             return re.sub(r"^([A-Z]+)(\d)", r"\1 \2", name)
         return f'"{name}"' if kind == "word" else name
@@ -1642,17 +1682,19 @@ class App(tk.Tk):
             self._save()
         self._after_skips_changed(f"{self._group_name(key)} will be sorted again.")
 
-    def _exclude_all_courses(self) -> None:
-        if engine.ALL_COURSES not in self.settings.skipped_groups:
-            self.settings.skipped_groups.append(engine.ALL_COURSES)
+    def _exclude_all(self, kind: str) -> None:
+        """Leave every course (or code word) alone, including ones added later."""
+        b = BUNDLES[kind]
+        if b["all"] not in self.settings.skipped_groups:
+            self.settings.skipped_groups.append(b["all"])
             self._save()
-        self._after_skips_changed("Excluded all courses: course files will be left where they are.")
+        self._after_skips_changed(f"Excluded all {b['title'].lower()}: their files will be left where they are.")
 
-    def _include_all_courses(self) -> None:
-        """Sort every course again, including ones that were excluded one by one."""
-        self.settings.skipped_groups = [k for k in self.settings.skipped_groups if not k.startswith("course:")]
+    def _include_all(self, kind: str) -> None:
+        """Sort every course (or code word) again, including ones that were excluded one by one."""
+        self.settings.skipped_groups = [k for k in self.settings.skipped_groups if not k.startswith(kind + ":")]
         self._save()
-        self._after_skips_changed("All courses will be sorted again.")
+        self._after_skips_changed(f"All {BUNDLES[kind]['title'].lower()} will be sorted again.")
 
     def _after_skips_changed(self, message: str) -> None:
         if self.phase == "preview" and not self.busy:
@@ -2135,7 +2177,7 @@ class App(tk.Tk):
         holder.grid(row=2 + i // cols, column=i % cols, sticky="nsew", padx=(0, p(14)), pady=(0, p(14)))
         row = tk.Frame(card, bg=CREAM)
         row.pack(fill="both", expand=True, padx=p(10), pady=p(10))
-        icon = tk.Label(row, image=self.sprites.compose("add", UPLOAD_TILE, 2), bg=CREAM)
+        icon = tk.Label(row, image=self.sprites.compose("add", ICON_COLOURS[2], 2), bg=CREAM)  # yellow tile
         icon.pack(side="left", anchor="n")
         text = tk.Frame(row, bg=CREAM)
         text.pack(side="left", fill="x", expand=True, padx=(p(10), 0))
