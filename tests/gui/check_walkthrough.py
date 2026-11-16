@@ -1,5 +1,5 @@
 """The main path through the app: start, Preview, Tidy up!, Categories, History, Undo,
-automatic sorting (which waits for the first Tidy up!), and the empty state."""
+automatic sorting (which starts as soon as it's switched on), and the empty state."""
 import os
 import time
 
@@ -59,15 +59,14 @@ check("Undo put everything back", (downloads / "holiday-beach.jpg").exists() and
 
 app.show_view("sort")
 app.settings.interval_seconds = 5
-app._flip_auto()
-pump(3.0)
-check("switching auto-sort on moves nothing yet", app.settings.auto_sort and app.auto is None
-      and app.counts == {str(downloads): 18, str(desktop): 6})
-check("it says it's waiting for the first Tidy up!", app.auto_wait.winfo_ismapped())
-app.tidy_btn.invoke()
-wait_idle()
-pump(3.9)
-check("the first Tidy up! starts auto-sort", app.auto is not None and app.settings.auto_armed)
+app._flip_auto()  # no Tidy up! click: switching it on is enough
+check("switching auto-sort on starts it straight away", app.settings.auto_sort and app.auto is not None)
+end = time.time() + 12
+while time.time() < end and not (downloads / "Images" / "holiday-beach.jpg").exists():
+    pump(0.3)
+pump(1.0)
+check("it tidied the loose files by itself", (downloads / "Images" / "holiday-beach.jpg").exists()
+      and (desktop / "Fonts" / "font.ttf").exists() and not (downloads / "resume.docx").exists())
 make(downloads, ["new-download.pdf"])
 end = time.time() + 12
 while time.time() < end and (downloads / "new-download.pdf").exists():

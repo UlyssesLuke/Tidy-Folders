@@ -957,7 +957,7 @@ class App(tk.Tk):
         self._init_fonts()
         self._init_style()
         self._build()
-        if self.settings.auto_sort and self.settings.auto_armed:
+        if self.settings.auto_sort:
             self._start_auto()
         self._update_auto_label()
         self._scan()
@@ -1220,8 +1220,6 @@ class App(tk.Tk):
         interval.pack(side="left", padx=(p(8), 0))
         interval.bind("<<ComboboxSelected>>", self._on_interval_changed)
         self.auto_face = tk.Label(row, bg=CREAM, image=self.sprites.get("faces/smug.png", 2))
-        self.auto_wait = tk.Label(box, bg=CREAM, fg=BLUE, font=self.f_small_b,  # its own line, so it always fits
-                                  text="Waiting: auto-sort starts after your first Tidy up!")
 
         row2 = tk.Frame(box, bg=CREAM)
         row2.pack(fill="x", padx=p(14), pady=(p(4), p(12)))
@@ -2123,7 +2121,6 @@ class App(tk.Tk):
         total = sum(len(m) for m in plans.values())
         if total == 0:
             self.phase = "idle"
-            self._arm_auto()  # a Tidy up! with nothing to move still counts as the first one
             self._refresh_everything()
             self.status_var.set("Nothing to sort. Your folders are already tidy.")
             return
@@ -2145,7 +2142,6 @@ class App(tk.Tk):
         self.result = (moved, errors)
         self.phase = "problem" if errors else "done"
         self.plans = {}
-        self._arm_auto()  # the first Tidy up! after switching auto-sort on starts it
         self._scan()
         self._update_folder_cards()
         self._show_panel()
@@ -2592,10 +2588,9 @@ class App(tk.Tk):
         if self.auto_var.get():
             if not messagebox.askyesno(
                     APP_NAME, "Automatic sorting keeps these folders tidy by itself.\n\n"
-                              "Nothing moves straight away: it starts after you click Tidy up! once, "
-                              "so the first tidy-up is always yours to check. After that, new files are "
-                              f"sorted every {self.interval_var.get()} without asking (each is left for a "
-                              "minute first, so downloads can finish).\n\n"
+                              "It starts straight away: loose files are sorted now, then new ones every "
+                              f"{self.interval_var.get()} without asking (each is left for a minute first, "
+                              "so downloads can finish).\n\n"
                               "Nothing is ever deleted, and every sort can be undone from the History "
                               "tab.\n\nTurn on automatic sorting?", parent=self):
                 self.auto_var.set(False)
@@ -2607,29 +2602,21 @@ class App(tk.Tk):
             self._set_auto(False)
 
     def _set_auto(self, on: bool) -> None:
-        """Switch auto-sort on or off. Switching it on waits for the next Tidy up! before it runs."""
+        """Switch auto-sort on (it starts sorting straight away) or off."""
         self.settings.auto_sort = on
-        self.settings.auto_armed = False
         self.auto_var.set(on)
         self.auto_switch.set(on)
         self._save()
-        self._stop_auto()
+        if on:
+            self._start_auto()
+        else:
+            self._stop_auto()
         self._update_auto_label()
         self._update_mood()
         if self.tray:
             self.tray.refresh_menu()
         if on:
-            self.status_var.set("Automatic sorting is on. It starts after you click Tidy up! once.")
-
-    def _arm_auto(self) -> None:
-        """After a Tidy up!, start auto-sort if it was switched on and waiting."""
-        if self.settings.auto_sort and not self.settings.auto_armed:
-            self.settings.auto_armed = True
-            self._save()
-            self._start_auto()
-            self._update_auto_label()
-            if self.tray:
-                self.tray.refresh_menu()
+            self.status_var.set("Automatic sorting is on: tidying your folders now, then new files as they arrive.")
 
     def _start_auto(self) -> None:
         if self.auto:
@@ -2647,15 +2634,11 @@ class App(tk.Tk):
 
     def _update_auto_label(self) -> None:
         self.auto_face.pack_forget()
-        self.auto_wait.pack_forget()
         if self.auto:
             self.auto_state_var.set("On. Keeps working in the tray after you close the window."
                                     if self.tray and self.settings.close_to_tray
                                     else "On. Runs while this window is open.")
             self.auto_face.pack(side="right")
-        elif self.settings.auto_sort:
-            self.auto_state_var.set("On, waiting: starts after you click Tidy up! once.")
-            self.auto_wait.pack(anchor="w", padx=self.px(14), pady=(self.px(2), 0), before=self.auto_row2)
         else:
             self.auto_state_var.set("Off.")
 
@@ -2757,7 +2740,6 @@ class App(tk.Tk):
         plans = self._plan_all(quiet=True)
         total = sum(len(m) for m in plans.values())
         if total == 0:
-            self._arm_auto()
             self.tray.notify("Nothing to sort. Your folders are already tidy.")
             return
         batch = uuid.uuid4().hex[:12]
@@ -2781,9 +2763,8 @@ class App(tk.Tk):
         turn_on = not self.settings.auto_sort
         self._set_auto(turn_on)
         if self.tray:
-            self.tray.notify(
-                "Automatic sorting is on. It starts after you click Sort now (or Tidy up!) once."
-                if turn_on else "Automatic sorting is off.")
+            self.tray.notify("Automatic sorting is on: tidying your folders now." if turn_on
+                             else "Automatic sorting is off.")
 
     def _listen_for_show_requests(self) -> None:
         """Opening Tidy Folders again (e.g. from the Start menu) shows this window."""
