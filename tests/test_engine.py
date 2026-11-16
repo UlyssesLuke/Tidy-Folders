@@ -282,6 +282,17 @@ class NameRuleTests(unittest.TestCase):
         make(self.downloads, "ENGGEN115 report.pdf")
         self.assertNotIn("ENGGEN115 report.pdf", self.where())
 
+    def test_exclude_all_code_words_at_once(self):
+        self.settings.keyword_rules = [{"word": "invoice", "folder": str(self.base / "Finance")}]
+        for name in ["march_invoice.pdf", "ELECTENG101_Lab1.pdf", "photo.jpg"]:
+            make(self.downloads, name)
+        self.settings.skipped_groups = [engine.ALL_WORDS]
+        self.assertEqual(self.where(), {"ELECTENG101_Lab1.pdf": Path("Uni/2026/Semester 1/ELECTENG 101"),
+                                        "photo.jpg": Path("Downloads/Images")})
+        self.settings.keyword_rules.append({"word": "receipt", "folder": str(self.base / "Finance")})
+        make(self.downloads, "receipt 12.pdf")                       # a code word added later is excluded too
+        self.assertNotIn("receipt 12.pdf", self.where())
+
     def test_file_type_logos_are_kept(self):
         path = self.base / "settings.json"
         s = Settings(category_icons={"Games": {"glyph": 5, "colour": "#1275B3"}, "Art": {"file": "custom-ab12.png"},
