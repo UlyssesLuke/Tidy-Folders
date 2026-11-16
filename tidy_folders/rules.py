@@ -67,7 +67,6 @@ class Settings:
     course_roots: list[str] = field(default_factory=list)   # folders searched (at any depth) for course folders
     keyword_rules: list[dict] = field(default_factory=list)  # [{"word": "invoice", "folder": "C:\\...\\Finance"}]
     skipped_groups: list[str] = field(default_factory=list)  # left alone: "type:Other", "course:ELECTENG101"...
-    auto_armed: bool = False        # auto-sort only runs after the first Tidy up! once it's switched on
     # Logos picked for file types: {"Games": {"glyph": 5, "colour": "#1275B3"}} or {"Games": {"file": "custom-1a2b.png"}}
     category_icons: dict[str, dict] = field(default_factory=dict)
     # Where a file type's folder is made, if not inside each folder being tidied:
@@ -80,9 +79,7 @@ class Settings:
         known = {f.name for f in fields(cls)}
         for key, value in data.items():
             if key in known:
-                setattr(s, key, value)
-        if "auto_armed" not in data:  # settings from before this option: keep auto-sort working as it was
-            s.auto_armed = bool(s.auto_sort)
+                setattr(s, key, value)  # unknown keys (like the old "auto_armed") are ignored
         s.skipped_groups = ([str(g) for g in s.skipped_groups if isinstance(g, str)]
                             if isinstance(s.skipped_groups, list) else [])
         icons = {}

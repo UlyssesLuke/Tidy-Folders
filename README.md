@@ -86,10 +86,10 @@ label to see the full path. Undo removes folders a tidy-up made, once they're em
 
 ### Automatic sorting and the tray
 
-- Switch on **Keep these folders tidy automatically**, then click **Tidy up!** once:
-  nothing moves until you do, so the first tidy-up is always yours to check. After that,
-  new files are sorted by themselves. Files are left alone until they're a minute old,
-  so downloads can finish.
+- Switch on **Keep these folders tidy automatically** and it starts straight away: loose
+  files are sorted right then, and new ones as they arrive. Files are left alone until
+  they're a minute old, so downloads can finish. Every automatic sort shows up on the
+  History page and can be undone.
 - **Closing the window** hides it to the tray (next to the clock; on Windows 11 it may be
   under the **^** arrow). Click the tray icon to open it again; right-click for
   *Sort now*, *Automatic sorting* and *Quit*.

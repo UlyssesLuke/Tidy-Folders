@@ -333,10 +333,11 @@ class NameRuleTests(unittest.TestCase):
         self.assertEqual(load_settings(path).category_icons,
                          {"Games": {"glyph": 5, "colour": "#1275B3"}, "Art": {"file": "custom-ab12.png"}})
 
-    def test_auto_sort_waits_unless_it_was_already_running(self):
-        self.assertTrue(Settings.from_dict({"auto_sort": True}).auto_armed)    # settings from before: keeps running
-        self.assertFalse(Settings.from_dict({"auto_sort": True, "auto_armed": False}).auto_armed)
-        self.assertFalse(Settings().auto_armed)
+    def test_old_auto_sort_setting_is_ignored(self):
+        # Older versions waited for a first Tidy up! ("auto_armed"); now auto-sort just runs when it's on.
+        s = Settings.from_dict({"auto_sort": True, "auto_armed": False})
+        self.assertTrue(s.auto_sort)
+        self.assertFalse(hasattr(s, "auto_armed"))
 
     def test_code_words_and_order(self):
         finance = self.base / "Finance"

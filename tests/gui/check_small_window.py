@@ -19,8 +19,7 @@ from tidy_folders import gui, rules  # noqa: E402
 messagebox.askyesno = lambda *a, **k: True
 rules.save_settings(rules.Settings(folders=[str(downloads)], course_roots=[str(uni)],
                                    keyword_rules=[{"word": "invoice", "folder": str(work / "Finance")}],
-                                   skipped_groups=["type:Other", "type:Images", "type:Documents", "course:MATHS108"],
-                                   auto_sort=True, auto_armed=False))
+                                   skipped_groups=["type:Other", "type:Images", "type:Documents", "course:MATHS108"]))
 
 
 def sticking_out(widget, right_edge):

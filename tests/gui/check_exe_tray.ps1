@@ -13,7 +13,7 @@ $old = (Get-Date).AddDays(-10)
 foreach ($n in 'holiday.jpg', 'invoice.pdf', 'song.mp3') {
     $p = Join-Path $sample $n; Set-Content -Path $p -Value 'sample'; (Get-Item $p).LastWriteTime = $old
 }
-@{ folders = @($sample); auto_sort = $true; auto_armed = $true; interval_seconds = 5; tray_hint_shown = $true } |
+@{ folders = @($sample); auto_sort = $true; interval_seconds = 5; tray_hint_shown = $true } |
     ConvertTo-Json | Set-Content -Path (Join-Path $appHome 'settings.json') -Encoding utf8
 
 Add-Type @"
