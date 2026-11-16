@@ -1,8 +1,8 @@
 # Shown in the .exe's Properties > Details tab. Used by build.bat.
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(1, 0, 1, 0),
+    prodvers=(1, 0, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -14,12 +14,12 @@ VSVersionInfo(
     StringFileInfo([
       StringTable('040904B0', [
         StringStruct('FileDescription', 'Tidy Folders'),
-        StringStruct('FileVersion', '1.0.0'),
+        StringStruct('FileVersion', '1.0.1'),
         StringStruct('InternalName', 'TidyFolders'),
         StringStruct('LegalCopyright', 'Copyright (c) 2026 UlyssesLuke. Code: MIT License. Art: all rights reserved.'),
         StringStruct('OriginalFilename', 'Tidy Folders.exe'),
         StringStruct('ProductName', 'Tidy Folders'),
-        StringStruct('ProductVersion', '1.0.0')
+        StringStruct('ProductVersion', '1.0.1')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
