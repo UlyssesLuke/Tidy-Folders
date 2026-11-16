@@ -1,6 +1,0 @@
-This is an old version of the website I created for myself to easily find the files for my University courses without having to search through my folders.
-Initially it was not meant to sort the files for you, just help you to find and open them.
-
-This has been discontinued and turned into the application Tidy Folders. Hence, this folder can be deleted
-
-Please delete this folder. Thank you.

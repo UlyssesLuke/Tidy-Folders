@@ -6,6 +6,7 @@ import queue
 import re
 import sys
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 import uuid
@@ -14,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from . import engine, startup
+from . import __version__, crashlog, engine, startup
 from . import tray as tray_mod
 from .rules import APP_NAME, data_dir, default_categories, load_settings, normalize_ext, save_settings
 from .watcher import AutoSorter
@@ -930,6 +931,7 @@ class App(tk.Tk):
         self.minsize(self.px(940), self.px(680))
         self.configure(bg=PAGE)
 
+        self._last_error_note = 0.0  # when the "something went wrong" message was last shown
         self.settings = load_settings()
         self.history = engine.History()
         self.events: queue.Queue = queue.Queue()  # work for the UI thread
@@ -1100,6 +1102,19 @@ class App(tk.Tk):
                       "hist": self._build_history_view()}
         self.show_view("sort")
 
+    def report_callback_exception(self, exc, val, tb) -> None:
+        """A button, timer or window hit an unexpected error. Save the details to error.log and say so
+        (at most once a minute), instead of silently doing nothing: the .exe has no console."""
+        path = crashlog.write(exc, val, tb, "window")
+        try:
+            self.status_var.set("Something went wrong. The details were saved to error.log.")
+        except Exception:
+            pass
+        now = time.monotonic()
+        if now - self._last_error_note > 60:
+            self._last_error_note = now
+            messagebox.showerror(APP_NAME, crashlog.message(path), parent=self)
+
     def _build_sidebar(self) -> None:
         p, sb = self.px, self.sidebar
         # Room for 4 lines (so the mascot and buttons below stay put); it only grows for longer messages.
@@ -1135,6 +1150,8 @@ class App(tk.Tk):
                             font=self.f_body_b, pady=7)
             b.pack(anchor="w", pady=(0, p(8)))
             self.nav_buttons[key] = b
+        tk.Label(sb, text=f"Version {__version__}", font=self.f_small, bg=CREAM, fg=MUTED).pack(
+            side="bottom", anchor="w", padx=p(22), pady=(0, p(10)))
 
     def show_view(self, key: str) -> None:
         self.view = key
@@ -1947,10 +1964,12 @@ class App(tk.Tk):
             try:
                 result = work()
             except Exception as err:  # surface anything unexpected instead of dying silently
-                def fail(err=err):
+                path = crashlog.write(type(err), err, err.__traceback__, message)
+
+                def fail(err=err, path=path):
                     self.animating = False
                     self._set_busy(False)
-                    messagebox.showerror(APP_NAME, f"Something went wrong:\n\n{err}", parent=self)
+                    messagebox.showerror(APP_NAME, f"{err}\n\n" + crashlog.message(path), parent=self)
                 self.events.put(fail)
                 return
 
@@ -2842,6 +2861,7 @@ def _ask_running_copy_to_show() -> bool:
 
 
 def main() -> None:
+    crashlog.install()  # anything that goes wrong is saved to error.log, not lost
     start_hidden = "--tray" in sys.argv[1:]
     if sys.platform == "win32":
         import ctypes

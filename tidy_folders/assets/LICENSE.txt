@@ -1,0 +1,30 @@
+Tidy Folders art: all rights reserved
+=====================================
+
+The code of Tidy Folders is under the MIT License (see LICENSE at the top of the
+project). The art is not.
+
+The pixel art and images in this folder (tidy_folders/assets) and its subfolders,
+including the app icon and logo, the folder buddy, the file-type icons, the logo
+symbols, the badges, the sorting animation, buttons, switches and sparkles, and the
+screenshots of the app in docs/screenshots, are:
+
+    Copyright (c) 2026 UlyssesLuke. All rights reserved.
+
+You may:
+  - keep the art in copies and forks of the Tidy Folders repository, and
+  - use it when you run or build Tidy Folders for yourself.
+
+You may not, without written permission:
+  - use any of the art in another project, app, website or product, or
+  - release or share your own build or version of Tidy Folders (an .exe, a copy
+    under another name, or a changed version) that includes the art. Replace it
+    with your own art first.
+
+To ask for permission, open an issue at https://github.com/UlyssesLuke/Tidy-Folders/issues.
+
+
+The font is the exception
+-------------------------
+Pixelify Sans in the fonts folder is not covered by the above. It is under the
+SIL Open Font License 1.1: see fonts/OFL.txt.

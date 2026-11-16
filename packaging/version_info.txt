@@ -16,6 +16,7 @@ VSVersionInfo(
         StringStruct('FileDescription', 'Tidy Folders'),
         StringStruct('FileVersion', '1.0.0'),
         StringStruct('InternalName', 'TidyFolders'),
+        StringStruct('LegalCopyright', 'Copyright (c) 2026 UlyssesLuke. Code: MIT License. Art: all rights reserved.'),
         StringStruct('OriginalFilename', 'Tidy Folders.exe'),
         StringStruct('ProductName', 'Tidy Folders'),
         StringStruct('ProductVersion', '1.0.0')
