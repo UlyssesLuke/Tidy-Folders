@@ -57,9 +57,12 @@ where). Hover the blue **→ Folder\\** label to see the full path files go to.
 
 **Choosing where a new folder goes:** click that symbol to pick a different place.
 For a file type, e.g. 3D Printing, its folder is then made there (say
-`Documents\3D Printing`) for every folder you tidy, and the file type's card on the
-Categories page shows it; **Reset location** in the Preview puts it back. Picking a
-folder that's already called 3D Printing uses it as is. For a code word, its folder
+`Documents\3D Printing`) for every folder you tidy; **Reset location** in the Preview
+puts it back. You can also see and change it any time under **Folder location** when
+you click the file type on the Categories page (or add a new one): the folder button
+picks a place, and "Use the usual place" puts it back. Clicking the **Other** card does
+the same for the Other folder. Picking a folder that's already
+called 3D Printing uses it as is. For a code word, its folder
 moves to the place you pick. On the Code words row, the symbol opens the list so you
 can choose for each one.
 Undo removes any folder a tidy-up created, as long as it's empty again.
