@@ -318,6 +318,7 @@ def plan_sort(folder: str | Path, settings: Settings, min_age: float = 0,
     rules = build_name_rules(settings)
     skipped = set() if include_skipped else set(settings.skipped_groups)
     blocked: dict[Path, bool] = {}  # rule folders that are unsafe, or the folder being sorted itself
+    located: dict[str, Path | None] = {}  # file types sent to a place of their own (checked once)
     try:
         here = folder.resolve()
     except OSError:
@@ -359,13 +360,38 @@ def plan_sort(folder: str | Path, settings: Settings, min_age: float = 0,
         if f"type:{category}" in skipped:
             continue
         sub = subfolder_for(category, st.st_mtime, settings.mode)
-        # Never put a file into a subfolder named like the folder it's already in
-        # (e.g. sorting "Downloads\Images" must not create "Images\Images").
-        if sub.parts[0].lower() == folder.name.lower():
-            continue
-        dst = unique_destination(folder / sub / entry.name, reserved)
+        base = category_base(category, settings, located) or folder
+        if base is folder:
+            # Never put a file into a subfolder named like the folder it's already in
+            # (e.g. sorting "Downloads\Images" must not create "Images\Images").
+            if sub.parts[0].lower() == folder.name.lower():
+                continue
+        elif same_folder(base / sub.parts[0], here):
+            continue  # this is that file type's own folder: already where it belongs
+        dst = unique_destination(base / sub / entry.name, reserved)
         moves.append(Move(entry.path, str(dst), category))
     return moves
+
+
+def category_base(category: str, settings: Settings, cache: dict | None = None) -> Path | None:
+    """Where a file type's folder is made when the user chose a place for it (settings.category_locations),
+    or None for the usual place: inside the folder being tidied. A chosen place that's gone missing or
+    isn't safe is ignored. Not used when sorting by month only (there are no file-type folders)."""
+    location = settings.category_locations.get(category)
+    if not location or settings.mode == "month":
+        return None
+    cache = {} if cache is None else cache
+    if location not in cache:
+        p = Path(location)
+        cache[location] = p if p.is_dir() and target_problem(p) is None else None
+    return cache[location]
+
+
+def same_folder(a: str | Path, b: str | Path) -> bool:
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------- moving

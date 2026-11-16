@@ -54,6 +54,14 @@ It goes inside the folder being tidied, so Code files in Downloads go to
 `Downloads\Code`. In the Preview, a small folder-with-a-plus symbol next to a group
 means that folder doesn't exist yet and Tidy up! will create it (hover it to see
 where). Hover the blue **→ Folder\\** label to see the full path files go to.
+
+**Choosing where a new folder goes:** click that symbol to pick a different place.
+For a file type, e.g. 3D Printing, its folder is then made there (say
+`Documents\3D Printing`) for every folder you tidy, and the file type's card on the
+Categories page shows it; **Reset location** in the Preview puts it back. Picking a
+folder that's already called 3D Printing uses it as is. For a code word, its folder
+moves to the place you pick. On the Code words row, the symbol opens the list so you
+can choose for each one.
 Undo removes any folder a tidy-up created, as long as it's empty again.
 
 ## Course folders and code words
