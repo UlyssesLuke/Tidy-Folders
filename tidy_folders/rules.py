@@ -70,6 +70,9 @@ class Settings:
     auto_armed: bool = False        # auto-sort only runs after the first Tidy up! once it's switched on
     # Logos picked for file types: {"Games": {"glyph": 5, "colour": "#1275B3"}} or {"Games": {"file": "custom-1a2b.png"}}
     category_icons: dict[str, dict] = field(default_factory=dict)
+    # Where a file type's folder is made, if not inside each folder being tidied:
+    # {"3D Printing": "C:\\Users\\me\\Documents"} sends .stl files to Documents\3D Printing.
+    category_locations: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Settings":
@@ -89,6 +92,8 @@ class Settings:
             elif isinstance(spec, dict) and isinstance(spec.get("glyph"), int) and isinstance(spec.get("colour"), str):
                 icons[str(name)] = {"glyph": spec["glyph"], "colour": spec["colour"]}
         s.category_icons = icons
+        s.category_locations = ({str(k): str(v) for k, v in s.category_locations.items() if k and isinstance(v, str) and v}
+                                if isinstance(s.category_locations, dict) else {})
         if s.mode not in MODES:
             s.mode = "type"
         s.folders = [str(f) for f in s.folders if isinstance(f, str)] if isinstance(s.folders, list) else []
