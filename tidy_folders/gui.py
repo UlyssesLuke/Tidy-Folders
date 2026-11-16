@@ -6,6 +6,7 @@ import queue
 import re
 import sys
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 import uuid
@@ -14,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from . import engine, startup
+from . import __version__, crashlog, engine, startup
 from . import tray as tray_mod
 from .rules import APP_NAME, data_dir, default_categories, load_settings, normalize_ext, save_settings
 from .watcher import AutoSorter
@@ -110,14 +111,26 @@ def join_names(names: list[str]) -> str:
     return f"{names[0]}, {names[1]} and {plural(len(names) - 2, 'more folder')}"
 
 
-def dest_label(move: engine.Move, folder: str) -> str:
-    """Short name for where a move goes: 'Images', '2026\\Semester 1\\ELECTENG 101' or 'Documents\\Finance'."""
+def dest_folder(move: engine.Move) -> Path:
+    """The folder a move puts its file in, as you'd see it in File Explorer: 'Downloads\\Images',
+    the course / code-word folder, or a file type's folder somewhere else ('Documents\\3D Printing')."""
     parent = Path(move.dst).parent
     if move.rule:
+        return parent
+    # 'Images\photo.jpg', or 'Images\2026-11\photo.jpg' when sorting by type and month: the file type's
+    # folder, wherever it is (inside the tidied folder, or a place chosen for it, even inside that folder).
+    # Sorting by month only: the month folder.
+    return parent.parent if parent.name != move.category and parent.parent.name == move.category else parent
+
+
+def dest_label(move: engine.Move, folder: str) -> str:
+    """Short name for where a move goes: 'Images', '2026\\Semester 1\\ELECTENG 101' or 'Documents\\Finance'."""
+    target = dest_folder(move)
+    if move.rule or target.parent != Path(folder):
         keep = 3 if move.rule == "course" else 2  # courses: show the year too
-        parts = [p for p in parent.parts[-keep:] if p not in (parent.anchor, "\\", "/")]
-        return "\\".join(parts) or str(parent)
-    return Path(os.path.relpath(move.dst, folder)).parts[0]
+        parts = [p for p in target.parts[-keep:] if p not in (target.anchor, "\\", "/")]
+        return "\\".join(parts) or str(target)
+    return target.name
 
 
 HAPPY_UP_TO = 2   # this many loose files (or fewer) still gets a smile
@@ -576,14 +589,61 @@ def link(parent, text, command, *, app, bg):
 
 # ====================================================================== category dialog
 
+class FolderLocation(tk.Frame):
+    """The "Folder location" part of a file type's window: a Change button with the folder logo,
+    where the folder goes, and a link back to the usual place (inside each folder you tidy).
+    Nothing is saved here: the window reads .location and .changed when you click Save."""
+
+    def __init__(self, parent, app, location: str | None, name, dialog: tk.Toplevel):
+        super().__init__(parent, bg=PAGE)
+        p = app.px
+        self.app, self.dialog, self.name = app, dialog, name  # name(): the folder's name right now ("" if none)
+        self.location, self.changed = location, False         # location None: inside each folder you tidy
+        self.button = PixelButton(self, "Change", self.choose, app=app, bg=PAGE,
+                                  icon=app.sprites.get("faces/front.png", 1), pady=4)
+        self.button.pack(side="left", anchor="n")
+        where = tk.Frame(self, bg=PAGE)
+        where.pack(side="left", fill="x", expand=True, padx=(p(12), 0))
+        self.label = tk.Label(where, font=app.f_small, bg=PAGE, fg=INK, justify="left", anchor="w",
+                              wraplength=p(330))
+        self.label.pack(fill="x")
+        self.reset_link = link(where, "Use the usual place (inside each folder you tidy)", self.reset,
+                               app=app, bg=PAGE)
+        self.refresh()
+
+    def refresh(self) -> None:
+        name = self.name() or "this file type"
+        folders = self.app.settings.folders
+        if self.location:
+            text = str(Path(self.location) / name)
+            self.reset_link.pack(anchor="w", pady=(self.app.px(2), 0))
+        else:
+            text = "Inside each folder you tidy" + (f", like {Path(folders[0]) / name}" if folders else "")
+            self.reset_link.pack_forget()
+        if self.app.settings.mode == "month":
+            text += "\n(Not used while sorting by month only.)"
+        self.label.configure(text=text)
+
+    def choose(self) -> None:
+        place = self.app._ask_place(self.name() or "New file type", self.location, parent=self.dialog)
+        if place is not None:
+            self.location, self.changed = self.app._location_value(place), True
+            self.refresh()
+
+    def reset(self) -> None:
+        self.location, self.changed = None, True
+        self.refresh()
+
+
 class CategoryDialog(tk.Toplevel):
-    """Add or edit one file type: its folder name, its extensions and its logo.
+    """Add or edit one file type: its folder name, its extensions, its logo and where its folder goes.
 
     The logo picker is a 3x3 grid: 8 ready-made symbols (assets/glyphs/1-8.png) and an
     "upload your own" tile, next to 9 colours to put the symbol on.
     """
 
-    def __init__(self, app, title, validate, name="", exts="", can_remove=False, icon=None, wait=True):
+    def __init__(self, app, title, validate, name="", exts="", can_remove=False, icon=None, wait=True,
+                 location: str | None = None):
         super().__init__(app)
         p = app.px
         self.app = app
@@ -648,8 +708,13 @@ class CategoryDialog(tk.Toplevel):
         if name and (ASSETS / "categories" / f"{name}.png").exists():
             link(preview, "Use the original logo", self._use_original, app=app, bg=PAGE).pack(anchor="w")
 
+        tk.Label(body, text="Folder location", font=app.f_body_b, bg=PAGE, fg=INK).grid(row=7, column=0, sticky="w")
+        self.place = FolderLocation(body, app, location, lambda: self.name_var.get().strip() or name, self)
+        self.place.grid(row=8, column=0, sticky="we", pady=(p(6), p(18)))
+        self.name_var.trace_add("write", lambda *_: self.place.refresh())
+
         buttons = tk.Frame(body, bg=PAGE)
-        buttons.grid(row=7, column=0, sticky="we")
+        buttons.grid(row=9, column=0, sticky="we")
         if can_remove:
             PixelButton(buttons, "Remove", self._remove, app=app, bg=PAGE).pack(side="left")
         PixelButton(buttons, "Cancel", self.destroy, app=app, bg=PAGE).pack(side="right")
@@ -739,6 +804,56 @@ class CategoryDialog(tk.Toplevel):
         self.destroy()
 
 
+class OtherDialog(tk.Toplevel):
+    """The "Other" file type (anything not listed in another one). It has no file types or name to
+    change, so this window is just where its folder goes."""
+
+    def __init__(self, app, location: str | None, wait: bool = True):
+        super().__init__(app)
+        p = app.px
+        self.app = app
+        self.title("Other files")
+        self.transient(app)
+        self.resizable(False, False)
+        self.configure(bg=PAGE)
+        self.result: str | None = None
+        body = tk.Frame(self, bg=PAGE)
+        body.pack(fill="both", expand=True, padx=p(20), pady=p(18))
+        head = tk.Frame(body, bg=PAGE)
+        head.pack(fill="x", pady=(0, p(16)))
+        tk.Label(head, image=app.category_sprite(engine.OTHER), bg=PAGE).pack(side="left", anchor="n")
+        text = tk.Frame(head, bg=PAGE)
+        text.pack(side="left", fill="x", expand=True, padx=(p(12), 0))
+        tk.Label(text, text=engine.OTHER, font=app.f_body_b, bg=PAGE, fg=INK, anchor="w").pack(fill="x")
+        about = "Files whose type isn't listed in another file type."
+        if not app.settings.other_folder:
+            about += ('\nTurned off right now, so they stay where they are. Switch on "Put files of '
+                      'unknown types in an "Other" folder" on the Categories page to use it.')
+        tk.Label(text, text=about, font=app.f_small, bg=PAGE, fg=MUTED, justify="left", anchor="w",
+                 wraplength=p(380)).pack(fill="x")
+        tk.Label(body, text="Folder location", font=app.f_body_b, bg=PAGE, fg=INK, anchor="w").pack(fill="x")
+        self.place = FolderLocation(body, app, location, lambda: engine.OTHER, self)
+        self.place.pack(fill="x", pady=(p(6), p(18)))
+        buttons = tk.Frame(body, bg=PAGE)
+        buttons.pack(fill="x")
+        PixelButton(buttons, "Cancel", self.destroy, app=app, bg=PAGE).pack(side="right")
+        PixelButton(buttons, "Save", self._save, app=app, bg=PAGE, face=YELLOW).pack(side="right", padx=(0, p(10)))
+        self.bind("<Return>", lambda e: self._save())
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        self.update_idletasks()
+        x = app.winfo_rootx() + (app.winfo_width() - self.winfo_width()) // 2
+        y = app.winfo_rooty() + (app.winfo_height() - self.winfo_height()) // 3
+        self.geometry(f"+{max(0, x)}+{max(0, y)}")
+        if wait:  # tests drive the window without waiting on it
+            self.grab_set()
+            self.wait_window()
+
+    def _save(self) -> None:
+        self.result = "save"
+        self.destroy()
+
+
 class WordRuleDialog(tk.Toplevel):
     """Small window for adding a code word and the folder its files go to."""
 
@@ -816,6 +931,7 @@ class App(tk.Tk):
         self.minsize(self.px(940), self.px(680))
         self.configure(bg=PAGE)
 
+        self._last_error_note = 0.0  # when the "something went wrong" message was last shown
         self.settings = load_settings()
         self.history = engine.History()
         self.events: queue.Queue = queue.Queue()  # work for the UI thread
@@ -986,6 +1102,19 @@ class App(tk.Tk):
                       "hist": self._build_history_view()}
         self.show_view("sort")
 
+    def report_callback_exception(self, exc, val, tb) -> None:
+        """A button, timer or window hit an unexpected error. Save the details to error.log and say so
+        (at most once a minute), instead of silently doing nothing: the .exe has no console."""
+        path = crashlog.write(exc, val, tb, "window")
+        try:
+            self.status_var.set("Something went wrong. The details were saved to error.log.")
+        except Exception:
+            pass
+        now = time.monotonic()
+        if now - self._last_error_note > 60:
+            self._last_error_note = now
+            messagebox.showerror(APP_NAME, crashlog.message(path), parent=self)
+
     def _build_sidebar(self) -> None:
         p, sb = self.px, self.sidebar
         # Room for 4 lines (so the mascot and buttons below stay put); it only grows for longer messages.
@@ -1021,6 +1150,8 @@ class App(tk.Tk):
                             font=self.f_body_b, pady=7)
             b.pack(anchor="w", pady=(0, p(8)))
             self.nav_buttons[key] = b
+        tk.Label(sb, text=f"Version {__version__}", font=self.f_small, bg=CREAM, fg=MUTED).pack(
+            side="bottom", anchor="w", padx=p(22), pady=(0, p(10)))
 
     def show_view(self, key: str) -> None:
         self.view = key
@@ -1533,13 +1664,19 @@ class App(tk.Tk):
             chip_label = tk.Label(inner, text=chip, font=self.f_small_b, bg=CHIP_BG, fg=CHIP_FG, padx=p(6),
                                   pady=p(2), highlightthickness=p(2), highlightbackground=BLUE)
             chip_label.pack(side="right", anchor="n")
-            folders = sorted({str(self._dest_folder(m, f)) for f, m in items}, key=str.lower)
+            folders = sorted({str(dest_folder(m)) for _, m in items}, key=str.lower)
             new = [d for d in folders if not Path(d).exists()]
             Tooltip(chip_label, "Files go to:\n" + "\n".join(folders[:4]) +
                     (f"\n...and {len(folders) - 4} more" if len(folders) > 4 else "") +
                     ("\n\n(new folder: it'll be made when you click Tidy up!)" if new else ""), app=self)
-            if new:  # this tidy-up will create the folder: show it, and say so on hover
-                self._new_folder_badge(inner, bg, new)
+            if new:  # this tidy-up will create the folder: show it, say so on hover, click to choose where
+                if not rule and self.settings.mode != "month":
+                    pick = lambda c=cat: self._choose_location(c)  # noqa: E731
+                elif rule == "word":
+                    pick = lambda k=key: self._choose_word_location(k)  # noqa: E731
+                else:
+                    pick = None
+                self._new_folder_badge(inner, bg, new, pick, "Click to choose where to make it.")
         text = tk.Frame(inner, bg=bg)
         text.pack(side="left", fill="x", expand=True, padx=p(12))
         self._wrap(tk.Label(text, text=f"{cat}  ·  {plural(len(items), 'file')}" +
@@ -1569,23 +1706,24 @@ class App(tk.Tk):
             link(links, "Include again", lambda k=key: self._include_group(k), app=self, bg=bg).pack(side="left")
         else:
             link(links, "Exclude", lambda k=key: self._skip_group(k), app=self, bg=bg).pack(side="left")
+        if not rule and cat in self.settings.category_locations and self.settings.mode != "month":
+            tk.Label(links, text=" · ", font=self.f_small, bg=bg, fg=MUTED).pack(side="left")
+            link(links, "Reset location", lambda c=cat: self._reset_location(c), app=self, bg=bg).pack(side="left")
 
-    @staticmethod
-    def _dest_folder(move: engine.Move, folder: str) -> Path:
-        """The folder a move puts its file in that you'd see in File Explorer: 'Downloads\\Code',
-        or the course / code-word folder itself."""
-        if move.rule:
-            return Path(move.dst).parent
-        return Path(folder) / Path(os.path.relpath(move.dst, folder)).parts[0]
-
-    def _new_folder_badge(self, parent, bg: str, new: list[str]) -> None:
-        """The folder-with-a-plus symbol: this tidy-up will create these folders. Says so on hover."""
-        badge = tk.Label(parent, image=self.sprites.get("badges/new_folder.png", 1.5), bg=bg, cursor="question_arrow")
+    def _new_folder_badge(self, parent, bg: str, new: list[str], on_click=None, hint: str = "") -> None:
+        """The folder-with-a-plus symbol: this tidy-up will create these folders. Says so on hover;
+        `on_click` (if given) lets you choose where."""
+        badge = tk.Label(parent, image=self.sprites.get("badges/new_folder.png", 1.5), bg=bg,
+                         cursor="hand2" if on_click else "question_arrow")
         badge.pack(side="right", anchor="n", padx=(0, self.px(6)))
         badge.image_name = "new_folder"  # for tests
+        badge.on_click = on_click        # for tests
         Tooltip(badge, ("New folder: Tidy Folders will create\n" if len(new) == 1 else
                         "New folders: Tidy Folders will create\n") + "\n".join(new[:4]) +
-                (f"\n...and {len(new) - 4} more" if len(new) > 4 else "") + "\nwhen you click Tidy up!", app=self)
+                (f"\n...and {len(new) - 4} more" if len(new) > 4 else "") + "\nwhen you click Tidy up!" +
+                (f"\n\n{hint}" if on_click and hint else ""), app=self)
+        if on_click:
+            badge.bind("<Button-1>", lambda e: self.after_idle(on_click), add="+")
 
     def _plan_bundle_row(self, parent, kind: str, groups, skip: set[str], *, first: bool) -> None:
         """The "Courses" or "Code words" row: every course / code word together, with
@@ -1610,7 +1748,7 @@ class App(tk.Tk):
             tk.Label(inner, text="Left where they are", font=self.f_small_b, bg=bg, fg=MUTED, padx=p(6),
                      pady=p(2), highlightthickness=p(2), highlightbackground=LINE).pack(side="right", anchor="n")
         else:
-            where = sorted({str(self._dest_folder(m, f)) for k, v in groups.items() if not out[k] for f, m in v},
+            where = sorted({str(dest_folder(m)) for k, v in groups.items() if not out[k] for _, m in v},
                            key=str.lower)
             chip = tk.Label(inner, text=f"→ {plural(len(where), b['dest_noun'])}", font=self.f_small_b,
                             bg=CHIP_BG, fg=CHIP_FG, padx=p(6), pady=p(2), highlightthickness=p(2),
@@ -1619,8 +1757,10 @@ class App(tk.Tk):
             Tooltip(chip, b["tip"] + "\n" + "\n".join(where[:6]) +
                     (f"\n...and {len(where) - 6} more" if len(where) > 6 else ""), app=self)
             new = [d for d in where if not Path(d).exists()]
-            if new:
-                self._new_folder_badge(inner, bg, new)
+            if new:  # click: open the list, where each new folder has its own symbol to choose where it goes
+                self._new_folder_badge(inner, bg, new, lambda: self.expanded[kind] or flip(),
+                                       f"Click to see each {b['noun']}, then click its symbol to choose where "
+                                       "its folder goes.")
         text = tk.Frame(inner, bg=bg)
         text.pack(side="left", fill="x", expand=True, padx=p(12))
         status = "  ·  excluded" if fully_out else (f"  ·  {n_out} excluded" if n_out else "")
@@ -1674,13 +1814,79 @@ class App(tk.Tk):
         if key not in self.settings.skipped_groups:
             self.settings.skipped_groups.append(key)
             self._save()
-        self._after_skips_changed(f"Excluded {self._group_name(key)}: those files will be left where they are.")
+        self._after_plan_rules_changed(f"Excluded {self._group_name(key)}: those files will be left where they are.")
 
     def _include_group(self, key: str) -> None:
         if key in self.settings.skipped_groups:
             self.settings.skipped_groups.remove(key)
             self._save()
-        self._after_skips_changed(f"{self._group_name(key)} will be sorted again.")
+        self._after_plan_rules_changed(f"{self._group_name(key)} will be sorted again.")
+
+    # ------------------------------------------------------------------ where new folders go
+
+    def _ask_place(self, name: str, start: str | Path | None, parent: tk.Misc | None = None) -> Path | None:
+        """Ask where the `name` folder should be made. Returns the folder to make it in, or None.
+        Picking a folder that's already called `name` means "use that one"."""
+        parent = parent or self
+        start = Path(start) if start and Path(start).is_dir() else (
+            Path(self.settings.folders[0]) if self.settings.folders else Path.home())
+        path = filedialog.askdirectory(parent=parent, mustexist=True, initialdir=str(start),
+                                       title=f'Where should the "{name}" folder go?')
+        if not path:
+            return None
+        place = Path(path)
+        if place.name.lower() == name.lower():
+            place = place.parent
+        problem = engine.target_problem(place / name)
+        if problem:
+            messagebox.showwarning(APP_NAME, f"{place / name}\n\n{problem}", parent=parent)
+            return None
+        return place
+
+    def _location_value(self, place: Path) -> str | None:
+        """What to save as a file type's location: None when `place` is the only folder being tidied
+        (that's where its folder goes anyway)."""
+        home = self.settings.folders
+        return None if len(home) == 1 and engine.same_folder(place, home[0]) else str(place)
+
+    def _choose_location(self, category: str) -> None:
+        """Make a file type's folder somewhere else, e.g. Documents\\3D Printing, instead of
+        inside each folder being tidied."""
+        place = self._ask_place(category, self.settings.category_locations.get(category))
+        if place is None:
+            return
+        value = self._location_value(place)
+        if value:
+            self.settings.category_locations[category] = value
+        else:
+            self.settings.category_locations.pop(category, None)
+        self._save()
+        self._after_plan_rules_changed(f"{category} files will go to {place / category}.")
+
+    def _reset_location(self, category: str) -> None:
+        if self.settings.category_locations.pop(category, None):
+            self._save()
+        self._after_plan_rules_changed(f"{category} files will go into a {category} folder inside "
+                                       "each folder you tidy again.")
+
+    def _choose_word_location(self, key: str) -> None:
+        """Move a code word's (not yet made) folder somewhere else."""
+        rule = next((r for r in self.settings.keyword_rules
+                     if "word:" + "".join(c for c in r["word"].lower() if c.isalnum()) == key), None)
+        if rule is None:
+            return
+        old = Path(rule["folder"])
+        place = self._ask_place(old.name, old.parent)
+        if place is None:
+            return
+        target = place / old.name
+        if any(engine.same_folder(target, f) for f in self.settings.folders):
+            messagebox.showwarning(APP_NAME, f"{target}\n\nThat's one of the folders being tidied. "
+                                             "Choose somewhere else.", parent=self)
+            return
+        rule["folder"] = str(target)
+        self._save()
+        self._after_plan_rules_changed(f'Files with "{rule["word"]}" in their name will go to {target}.')
 
     def _exclude_all(self, kind: str) -> None:
         """Leave every course (or code word) alone, including ones added later."""
@@ -1688,15 +1894,15 @@ class App(tk.Tk):
         if b["all"] not in self.settings.skipped_groups:
             self.settings.skipped_groups.append(b["all"])
             self._save()
-        self._after_skips_changed(f"Excluded all {b['title'].lower()}: their files will be left where they are.")
+        self._after_plan_rules_changed(f"Excluded all {b['title'].lower()}: their files will be left where they are.")
 
     def _include_all(self, kind: str) -> None:
         """Sort every course (or code word) again, including ones that were excluded one by one."""
         self.settings.skipped_groups = [k for k in self.settings.skipped_groups if not k.startswith(kind + ":")]
         self._save()
-        self._after_skips_changed(f"All {BUNDLES[kind]['title'].lower()} will be sorted again.")
+        self._after_plan_rules_changed(f"All {BUNDLES[kind]['title'].lower()} will be sorted again.")
 
-    def _after_skips_changed(self, message: str) -> None:
+    def _after_plan_rules_changed(self, message: str) -> None:
         if self.phase == "preview" and not self.busy:
             self._preview()
         else:
@@ -1758,10 +1964,12 @@ class App(tk.Tk):
             try:
                 result = work()
             except Exception as err:  # surface anything unexpected instead of dying silently
-                def fail(err=err):
+                path = crashlog.write(type(err), err, err.__traceback__, message)
+
+                def fail(err=err, path=path):
                     self.animating = False
                     self._set_busy(False)
-                    messagebox.showerror(APP_NAME, f"Something went wrong:\n\n{err}", parent=self)
+                    messagebox.showerror(APP_NAME, f"{err}\n\n" + crashlog.message(path), parent=self)
                 self.events.put(fail)
                 return
 
@@ -2166,10 +2374,10 @@ class App(tk.Tk):
                 detail = ", ".join(exts)
             info = self._wrap(tk.Label(text, text=detail, font=self.f_small, bg=WHITE, fg=MUTED))
             info.pack(fill="x")
-            if exts is not None:
-                for widget in (card, row, icon, text, title, info):
-                    widget.configure(cursor="hand2")
-                    widget.bind("<Button-1>", lambda e, n=name: self._edit_category(n))
+            for widget in (card, row, icon, text, title, info):  # Other: only where its folder goes
+                widget.configure(cursor="hand2")
+                widget.bind("<Button-1>", (lambda e, n=name: self._edit_category(n)) if exts is not None
+                            else (lambda e: self._edit_other()))
 
         # The last box in the grid adds a new file type.
         i = len(entries)
@@ -2237,6 +2445,8 @@ class App(tk.Tk):
             spec = dlg.icon_spec()
             if spec:
                 self.settings.category_icons[name] = spec
+            if dlg.place.location:
+                self.settings.category_locations[name] = dlg.place.location
             self._categories_changed()
 
     def _edit_category(self, old: str, wait: bool = True) -> "CategoryDialog | None":
@@ -2245,7 +2455,8 @@ class App(tk.Tk):
         dlg = CategoryDialog(self, "Edit file type",
                              lambda n, e: self._validate_category(n, e, original=old),
                              name=old, exts=", ".join(self.settings.categories[old]), can_remove=True,
-                             icon=self.settings.category_icons.get(old), wait=wait)
+                             icon=self.settings.category_icons.get(old), wait=wait,
+                             location=self.settings.category_locations.get(old))
         if wait:
             self._finish_edit_category(dlg, old)
         return dlg
@@ -2259,6 +2470,7 @@ class App(tk.Tk):
                                    parent=self):
                 del self.settings.categories[old]
                 self.settings.category_icons.pop(old, None)
+                self.settings.category_locations.pop(old, None)
                 self._categories_changed()
             return
         _, name, exts = dlg.result
@@ -2269,7 +2481,27 @@ class App(tk.Tk):
             spec = dlg.icon_spec()
         if spec:
             self.settings.category_icons[name] = spec
+        place = self.settings.category_locations.pop(old, None)  # renamed: its folder stays where you chose
+        if dlg.place.changed:
+            place = dlg.place.location
+        if place:
+            self.settings.category_locations[name] = place
         self._categories_changed()
+
+    def _edit_other(self, wait: bool = True) -> "OtherDialog":
+        """The Other card: choose where the Other folder goes."""
+        dlg = OtherDialog(self, self.settings.category_locations.get(engine.OTHER), wait=wait)
+        if wait:
+            self._finish_edit_other(dlg)
+        return dlg
+
+    def _finish_edit_other(self, dlg: "OtherDialog") -> None:
+        if dlg.result == "save" and dlg.place.changed:
+            if dlg.place.location:
+                self.settings.category_locations[engine.OTHER] = dlg.place.location
+            else:
+                self.settings.category_locations.pop(engine.OTHER, None)
+            self._categories_changed()
 
     def _add_course_root(self) -> None:
         path = filedialog.askdirectory(parent=self, mustexist=True,
@@ -2334,10 +2566,11 @@ class App(tk.Tk):
             self.status_var.set(f'Removed the code word "{rule["word"]}".')
 
     def _reset_categories(self) -> None:
-        if messagebox.askyesno(APP_NAME, "Replace your file types (and their logos) with the built-in ones?",
-                               parent=self):
+        if messagebox.askyesno(APP_NAME, "Replace your file types (and their logos and folder locations) "
+                                         "with the built-in ones?", parent=self):
             self.settings.categories = default_categories()
             self.settings.category_icons = {}
+            self.settings.category_locations = {}
             self._categories_changed()
 
     def _on_options_changed(self, *_args) -> None:
@@ -2628,6 +2861,7 @@ def _ask_running_copy_to_show() -> bool:
 
 
 def main() -> None:
+    crashlog.install()  # anything that goes wrong is saved to error.log, not lost
     start_hidden = "--tray" in sys.argv[1:]
     if sys.platform == "win32":
         import ctypes

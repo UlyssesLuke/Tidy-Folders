@@ -43,6 +43,38 @@ class EngineTests(unittest.TestCase):
         return {Path(m.src).name: Path(os.path.relpath(m.dst, folder))
                 for m in engine.plan_sort(folder, self.settings, **kw)}
 
+    def where(self, folder=None):
+        return {Path(m.src).name: Path(m.dst) for m in engine.plan_sort(folder or self.root, self.settings)}
+
+    def test_file_type_folder_in_a_place_of_its_own(self):
+        docs = self.base / "Documents"
+        docs.mkdir()
+        self.settings.category_locations = {"Images": str(docs)}
+        make(self.root, "photo.jpg")
+        make(self.root, "report.pdf")
+        self.assertEqual(self.where(), {"photo.jpg": docs / "Images" / "photo.jpg",
+                                        "report.pdf": self.root / "Documents" / "report.pdf"})
+        run, errors = engine.apply_moves(engine.plan_sort(self.root, self.settings), self.root)
+        self.assertEqual(errors, [])
+        self.assertTrue((docs / "Images" / "photo.jpg").exists())
+        self.assertEqual(engine.undo_run(run), (2, []))
+        self.assertFalse((docs / "Images").exists())  # made by the tidy-up: removed by undo
+        month = datetime.fromtimestamp(OLD).strftime("%Y-%m")
+        self.settings.mode = "type_month"
+        self.assertEqual(self.where()["photo.jpg"], docs / "Images" / month / "photo.jpg")
+        self.settings.mode = "month"                  # no file-type folders: the place doesn't apply
+        self.assertEqual(self.where()["photo.jpg"], self.root / month / "photo.jpg")
+
+    def test_file_type_place_that_cant_be_used(self):
+        make(self.root, "photo.jpg")
+        for place in [self.base / "Gone", os.environ.get("SystemRoot", "C:\\Windows")]:
+            self.settings.category_locations = {"Images": str(place)}  # missing, or a system folder
+            self.assertEqual(self.where(), {"photo.jpg": self.root / "Images" / "photo.jpg"})
+        own = self.base / "Documents" / "Images"      # tidying that file type's own folder: nothing moves
+        make(own, "holiday.png")
+        self.settings.category_locations = {"Images": str(own.parent)}
+        self.assertEqual(self.where(own), {})
+
     def test_sort_and_undo_roundtrip(self):
         for f in ["photo.jpg", "report.PDF", "song.mp3", "budget.xlsx", "setup.exe",
                   "weird.xyz", "noext"]:
