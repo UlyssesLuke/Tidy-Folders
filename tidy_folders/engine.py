@@ -243,11 +243,13 @@ def build_name_rules(settings: Settings) -> list[NameRule]:
 
 
 ALL_COURSES = "course:*"  # in settings.skipped_groups: leave every course's files alone
+ALL_WORDS = "word:*"      # ...and every code word's files
+_EXCLUDE_ALL = {"course": ALL_COURSES, "word": ALL_WORDS}
 
 
 def is_excluded(move: Move, skipped: set[str]) -> bool:
-    """True if the user excluded this move's group (or all courses, for a course file)."""
-    return group_key(move) in skipped or (move.rule == "course" and ALL_COURSES in skipped)
+    """True if the user excluded this move's group (or all courses / all code words, for those files)."""
+    return group_key(move) in skipped or _EXCLUDE_ALL.get(move.rule) in skipped
 
 
 def group_key(move: Move) -> str:
