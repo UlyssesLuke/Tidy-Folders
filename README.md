@@ -34,10 +34,10 @@ the first time, because the file isn't code-signed. They can click
 2. **Exclude a group:** in the Preview, click **Exclude** on any group (a course, a
    code word, or a type like Other) and its files are left where they are, by
    Tidy up! and auto-sort alike. Click **Include again** there, or **Include** on the
-   Categories page, to sort them again. All courses share one **Courses** row:
-   **Show courses ▾** lists each course (each with its own Exclude), and
-   **Exclude all courses** / **Include all courses** act on every course at once,
-   including courses added later.
+   Categories page, to sort them again. All courses share one **Courses** row and
+   all code words one **Code words** row: **Show courses ▾** / **Show code words ▾**
+   lists each one (each with its own Exclude), and **Exclude all** / **Include all**
+   act on every course (or code word) at once, including ones added later.
 3. **Categories page:** change which file types go into which folder, or click
    the **Add file type** box (last in the grid) to make your own. Each file type gets a logo: pick one of 8
    symbols and one of 9 colours, or upload your own picture (24×21 pixel art looks
@@ -73,8 +73,8 @@ On the **Categories** page, under **Send files by name**:
 
 These are checked before file types: course folders first, then code words.
 Preview shows where each file will go, and Undo works the same as always.
-Optional art: `assets/categories/Course.png` and `Code word.png` (24×21) replace
-the neutral folder on those rows.
+The Courses and Code words rows use `assets/categories/Course.png` and
+`Code word.png` (24×21); each course or code word inside them uses the plain folder.
 
 ## Tray and start with Windows
 
@@ -98,7 +98,7 @@ All the pixel art lives in `tidy_folders/assets/`:
 
 | Folder | What it is |
 | --- | --- |
-| `faces/` | The folder buddy: happy, happy_tongue, sad, dead, smug, surprised, front, normal (24×21) |
+| `faces/` | The folder buddy: happy, happy_tongue, sad, dead, smug, surprised, front (24×21). `front` is the plain face, also used for file types without a logo |
 | `categories/` | One icon per category, named after it, e.g. `Images.png` (24×21) |
 | `nav/` | Sidebar icons (16×16) |
 | `button/` | The Tidy up! button: normal, hover, pressed (48×16) |
