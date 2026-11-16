@@ -1,4 +1,4 @@
-# Tidy Folders
+<img width="760" height="100" alt="TidyFoldersBanner" src="https://github.com/user-attachments/assets/f3c21730-38d0-4d7a-9f32-278eb7b0f27e" />
 
 A small Windows app that tidies the loose files in your Downloads, Desktop or any other
 folder into folders like **Images**, **Documents** and **Music**, with a pixel-art folder
